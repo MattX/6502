@@ -1,7 +1,7 @@
 Name     MCU_6502_Interface;
 PartNo   001;
 Date     2024-01-09;
-Revision 01;
+Revision 02;
 Designer ;
 Company  ;
 Assembly ;
@@ -36,23 +36,17 @@ PIN 6  = TX_LOAD;   /* MCU pulses high to load TX latch */
 PIN 7  = RX_ACK;    /* MCU pulses high to acknowledge RX read */
 
 /* ======================== OUTPUT PINS ======================= */
-PIN 18 = TX_OE_N;       /* Enable TX latch outputs onto 6502 bus (active low) */
-PIN 19 = RX_CLK;        /* Clock CPU write data into RX latch */
-PIN 20 = STATUS_OE_N;   /* Enable status latch outputs onto 6502 bus (active low) */
-PIN 21 = STATUS_CLK;    /* Clock status bits into status latch */
-PIN 22 = TX_AVAIL;      /* To status latch D7: MCU data available */
-PIN 23 = RX_READY;      /* To status latch D6: RX register empty */
-PIN 24 = DATA_TAKEN;    /* To MCU: CPU has read TX byte */
-PIN 25 = DATA_WRITTEN;  /* To MCU: CPU has written RX byte */
+/* Registered outputs on pins 18-21 (macrocell pins with flip-flops) */
+PIN 18 = TX_AVAIL;      /* To status latch D7: MCU data available */
+PIN 19 = RX_READY;      /* To status latch D6: RX register empty */
+PIN 20 = DATA_TAKEN;    /* To MCU: CPU has read TX byte */
+PIN 21 = DATA_WRITTEN;  /* To MCU: CPU has written RX byte */
 
-/* ======================== BURIED REGISTERS =================== */
-/* State flip-flops use buried nodes since output pins 22-25 may not
- * support registered outputs on ATF750LVC. Output pins are driven
- * combinatorially from these internal registers. */
-NODE tx_avail_reg;
-NODE rx_ready_reg;
-NODE data_taken_reg;
-NODE data_written_reg;
+/* Combinatorial outputs on pins 22-25 */
+PIN 22 = TX_OE_N;       /* Enable TX latch outputs onto 6502 bus (active low) */
+PIN 23 = RX_CLK;        /* Clock CPU write data into RX latch */
+PIN 24 = STATUS_OE_N;   /* Enable status latch outputs onto 6502 bus (active low) */
+PIN 25 = STATUS_CLK;    /* Clock status bits into status latch */
 
 /* ======================== INTERMEDIATE TERMS ================ */
 /* CPU bus cycle decode - active during valid portion of bus cycle */
@@ -88,11 +82,9 @@ STATUS_OE_N = !STATUS_READ;
  */
 STATUS_CLK = !PHI2;
 
-/* ======================== BURIED STATE REGISTERS ============ */
+/* ======================== REGISTERED OUTPUTS ================ */
 /*
  * Handshake state flip-flops using asynchronous set/reset.
- * These use buried nodes (internal registers) because pins 22-25
- * are combinatorial-only on the ATF750LVC.
  *
  * These respond immediately to MCU pulse signals (TX_LOAD, RX_ACK) and
  * CPU bus operations (TX_READ, RX_WRITE). The D input holds the current
@@ -103,48 +95,41 @@ STATUS_CLK = !PHI2;
  */
 
 /*
- * tx_avail_reg: Indicates MCU has sent data for CPU to read
+ * TX_AVAIL: Indicates MCU has sent data for CPU to read
  *   Set:   MCU pulses TX_LOAD (new data loaded into TX latch)
  *   Clear: CPU reads TX register (data taken)
  *   Power-on: 0 (no data available)
  */
-tx_avail_reg.ap = TX_LOAD;
-tx_avail_reg.ar = TX_READ;
-tx_avail_reg.d  = tx_avail_reg;
+TX_AVAIL.ap = TX_LOAD;
+TX_AVAIL.ar = TX_READ;
+TX_AVAIL.d  = TX_AVAIL;
 
 /*
- * rx_ready_reg: Indicates RX register is empty, CPU may write
+ * RX_READY: Indicates RX register is empty, CPU may write
  *   Set:   MCU pulses RX_ACK (acknowledges previous byte)
  *   Clear: CPU writes RX register (new data pending for MCU)
  *   Power-on: 0 (device default), MCU must pulse RX_ACK at init
  */
-rx_ready_reg.ap = RX_ACK;
-rx_ready_reg.ar = RX_WRITE;
-rx_ready_reg.d  = rx_ready_reg;
+RX_READY.ap = RX_ACK;
+RX_READY.ar = RX_WRITE;
+RX_READY.d  = RX_READY;
 
 /*
- * data_taken_reg: Signals to MCU that CPU has read the TX byte
+ * DATA_TAKEN: Signals to MCU that CPU has read the TX byte
  *   Set:   CPU reads TX register
  *   Clear: MCU pulses TX_LOAD (loading next byte)
  *   Power-on: 0
  */
-data_taken_reg.ap = TX_READ;
-data_taken_reg.ar = TX_LOAD;
-data_taken_reg.d  = data_taken_reg;
+DATA_TAKEN.ap = TX_READ;
+DATA_TAKEN.ar = TX_LOAD;
+DATA_TAKEN.d  = DATA_TAKEN;
 
 /*
- * data_written_reg: Signals to MCU that CPU has written an RX byte
+ * DATA_WRITTEN: Signals to MCU that CPU has written an RX byte
  *   Set:   CPU writes RX register
  *   Clear: MCU pulses RX_ACK (MCU has read the byte)
  *   Power-on: 0
  */
-data_written_reg.ap = RX_WRITE;
-data_written_reg.ar = RX_ACK;
-data_written_reg.d  = data_written_reg;
-
-/* ======================== STATE OUTPUT PINS ================= */
-/* Drive output pins combinatorially from buried registers */
-TX_AVAIL     = tx_avail_reg;
-RX_READY     = rx_ready_reg;
-DATA_TAKEN   = data_taken_reg;
-DATA_WRITTEN = data_written_reg;
+DATA_WRITTEN.ap = RX_WRITE;
+DATA_WRITTEN.ar = RX_ACK;
+DATA_WRITTEN.d  = DATA_WRITTEN;
