@@ -84,52 +84,53 @@ STATUS_CLK = !PHI2;
 
 /* ======================== REGISTERED OUTPUTS ================ */
 /*
- * Handshake state flip-flops using asynchronous set/reset.
+ * Handshake state flip-flops.
  *
- * These respond immediately to MCU pulse signals (TX_LOAD, RX_ACK) and
- * CPU bus operations (TX_READ, RX_WRITE). The D input holds the current
- * value to prevent any clock edge from disturbing the state.
+ * The ATF750 doesn't support async preset (.ap), only async reset (.ar).
+ * We implement "set on A, clear on B" by using A as the clock with D=1,
+ * and B as the async reset:
+ *   - Rising edge of A clocks in D=1, setting the output
+ *   - B going high asynchronously resets the output to 0
  *
  * TIMING NOTE: TX_LOAD and RX_ACK must be brief pulses from MCU.
- * The async reset has priority if both set and reset are asserted.
  */
 
 /*
  * TX_AVAIL: Indicates MCU has sent data for CPU to read
- *   Set:   MCU pulses TX_LOAD (new data loaded into TX latch)
- *   Clear: CPU reads TX register (data taken)
+ *   Set:   Rising edge of TX_LOAD (MCU loads TX latch)
+ *   Clear: TX_READ high (CPU reads TX register)
  *   Power-on: 0 (no data available)
  */
-TX_AVAIL.ap = TX_LOAD;
+TX_AVAIL.ck = TX_LOAD;
+TX_AVAIL.d  = 'b'1;
 TX_AVAIL.ar = TX_READ;
-TX_AVAIL.d  = TX_AVAIL;
 
 /*
  * RX_READY: Indicates RX register is empty, CPU may write
- *   Set:   MCU pulses RX_ACK (acknowledges previous byte)
- *   Clear: CPU writes RX register (new data pending for MCU)
+ *   Set:   Rising edge of RX_ACK (MCU acknowledges)
+ *   Clear: RX_WRITE high (CPU writes RX register)
  *   Power-on: 0 (device default), MCU must pulse RX_ACK at init
  */
-RX_READY.ap = RX_ACK;
+RX_READY.ck = RX_ACK;
+RX_READY.d  = 'b'1;
 RX_READY.ar = RX_WRITE;
-RX_READY.d  = RX_READY;
 
 /*
  * DATA_TAKEN: Signals to MCU that CPU has read the TX byte
- *   Set:   CPU reads TX register
- *   Clear: MCU pulses TX_LOAD (loading next byte)
+ *   Set:   Rising edge of TX_READ (CPU reads TX register)
+ *   Clear: TX_LOAD high (MCU loading next byte)
  *   Power-on: 0
  */
-DATA_TAKEN.ap = TX_READ;
+DATA_TAKEN.ck = TX_READ;
+DATA_TAKEN.d  = 'b'1;
 DATA_TAKEN.ar = TX_LOAD;
-DATA_TAKEN.d  = DATA_TAKEN;
 
 /*
  * DATA_WRITTEN: Signals to MCU that CPU has written an RX byte
- *   Set:   CPU writes RX register
- *   Clear: MCU pulses RX_ACK (MCU has read the byte)
+ *   Set:   Rising edge of RX_WRITE (CPU writes RX register)
+ *   Clear: RX_ACK high (MCU acknowledges)
  *   Power-on: 0
  */
-DATA_WRITTEN.ap = RX_WRITE;
+DATA_WRITTEN.ck = RX_WRITE;
+DATA_WRITTEN.d  = 'b'1;
 DATA_WRITTEN.ar = RX_ACK;
-DATA_WRITTEN.d  = DATA_WRITTEN;
