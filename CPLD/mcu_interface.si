@@ -1,7 +1,7 @@
-Name     MCU_6502_Interface_Test;
+Name     MCU_6502_Interface;
 PartNo   001;
 Date     2024-01-09;
-Revision 01;
+Revision 02;
 Designer ;
 Company  ;
 Assembly ;
@@ -11,212 +11,135 @@ Location ;
  * Test vectors for 6502-to-MCU Bus Interface CPLD
  *
  * Signal conventions:
- *   0 = low, 1 = high, X = don't care, C = clock pulse
- *   L = output expected low, H = output expected high, Z = high-impedance
+ *   0 = low, 1 = high, X = don't care
+ *   L = output expected low, H = output expected high
  *
- * Test coverage:
- *   1. Power-on / initialization
- *   2. MCU initialization (RX_ACK pulse to set RX_READY)
- *   3. TX path: MCU sends to CPU
- *   4. RX path: CPU sends to MCU
- *   5. Status register reads
- *   6. Bus contention prevention
+ * Output equations:
+ *   TX_OE_N     = !(PHI2 & !CS_N & !A0 & RW)   -- active LOW during TX read
+ *   RX_CLK      = PHI2 & !CS_N & !A0 & !RW     -- HIGH during RX write
+ *   STATUS_OE_N = !(PHI2 & !CS_N & A0 & RW)    -- active LOW during status read
+ *   STATUS_CLK  = !PHI2                         -- HIGH when PHI2 low
+ *   TX_AVAIL    = set on TX_LOAD rising, cleared on TX_READ
+ *   RX_READY    = set on RX_ACK rising, cleared on RX_WRITE
+ *   DATA_TAKEN  = set on TX_READ rising, cleared on TX_LOAD
+ *   DATA_WRITTEN = set on RX_WRITE rising, cleared on RX_ACK
  */
 
 ORDER: PHI2, CS_N, RW, A0, TX_LOAD, RX_ACK,
        TX_OE_N, RX_CLK, STATUS_OE_N, STATUS_CLK,
        TX_AVAIL, RX_READY, DATA_TAKEN, DATA_WRITTEN;
 
-/*
- * Input order:  PHI2 CS_N RW A0 TX_LOAD RX_ACK
- * Output order: TX_OE_N RX_CLK STATUS_OE_N STATUS_CLK TX_AVAIL RX_READY DATA_TAKEN DATA_WRITTEN
- */
-
 VECTORS:
 
 /* ================================================================
- * TEST 1: Power-on state (before MCU initialization)
+ * TEST 1: Power-on state
  * ================================================================
- * After power-on, all registers are 0:
- *   TX_AVAIL=0, RX_READY=0, DATA_TAKEN=0, DATA_WRITTEN=0
- * No chip select, no MCU activity
+ * All flip-flops start at 0: TX_AVAIL=0, RX_READY=0, DATA_TAKEN=0, DATA_WRITTEN=0
+ * PHI2=0: STATUS_CLK=H (inverted), all OE signals inactive (H)
  */
 
-/* Idle state: PHI2 low, CS not asserted */
-0 1 1 0 0 0    HLLHLLLL
-/* PHI2 high, but no chip select - outputs stay inactive */
-1 1 1 0 0 0    HLLLLLLLL
+/* Idle: PHI2=0, CS_N=1 (not selected) */
+0 1 1 0 0 0    HLHHLLLL
+
+/* PHI2=1, CS_N=1 (still not selected) - STATUS_CLK goes L */
+1 1 1 0 0 0    HLHLLLLL
 
 /* ================================================================
- * TEST 2: MCU initialization - pulse RX_ACK to set RX_READY
+ * TEST 2: MCU initialization - pulse RX_ACK to set RX_READY=1
  * ================================================================
- * MCU must do this at startup so CPU can write immediately
  */
 
-/* RX_ACK rising edge sets RX_READY */
-0 1 1 0 0 1    HLLHLHLL
+/* PHI2=0, RX_ACK rising edge sets RX_READY */
+0 1 1 0 0 1    HLHHLHLL
+
 /* RX_ACK returns low, RX_READY stays set */
-0 1 1 0 0 0    HLLHLHLL
+0 1 1 0 0 0    HLHHLHLL
 
 /* ================================================================
  * TEST 3: TX Path - MCU sends byte to CPU
  * ================================================================
- * Sequence:
- *   1. MCU pulses TX_LOAD -> TX_AVAIL=1, DATA_TAKEN=0
- *   2. CPU polls status, sees TX_AVAIL=1
- *   3. CPU reads TX register -> TX_AVAIL=0, DATA_TAKEN=1
- *   4. MCU sees DATA_TAKEN=1, can send next byte
  */
 
-/* 3.1: MCU loads TX latch - TX_LOAD rising edge */
-0 1 1 0 1 0    HLLHLHLL
-/* TX_AVAIL should now be 1, DATA_TAKEN cleared to 0 */
-/* (TX_LOAD clears DATA_TAKEN if it was set) */
+/* 3.1: MCU pulses TX_LOAD - sets TX_AVAIL, clears DATA_TAKEN */
+0 1 1 0 1 0    HLHHHHLL
 
-/* 3.2: TX_LOAD returns low, TX_AVAIL stays set */
-0 1 1 0 0 0    HLLHHHLL
+/* TX_LOAD returns low, TX_AVAIL stays set */
+0 1 1 0 0 0    HLHHHHLL
 
-/* 3.3: CPU reads status register (PHI2 high, CS low, A0=1, RW=1) */
-/* STATUS_OE_N should assert (go low) */
+/* 3.2: CPU reads status (PHI2=1, CS_N=0, A0=1, RW=1) */
+/* STATUS_OE_N goes L, STATUS_CLK goes L */
 1 0 1 1 0 0    HLLLHHLL
 
-/* PHI2 low - STATUS_OE_N deasserts */
-0 0 1 1 0 0    HLLHHHLL
+/* PHI2=0: STATUS_OE_N returns H, STATUS_CLK returns H */
+0 0 1 1 0 0    HLHHHHLL
 
-/* 3.4: CPU reads TX register (PHI2 high, CS low, A0=0, RW=1) */
-/* TX_OE_N should assert (go low), TX_AVAIL clears, DATA_TAKEN sets */
-1 0 1 0 0 0    LLHLHLHL
+/* 3.3: CPU reads TX register (PHI2=1, CS_N=0, A0=0, RW=1) */
+/* TX_OE_N goes L, TX_AVAIL clears, DATA_TAKEN sets */
+1 0 1 0 0 0    LLHLLHHL
 
-/* PHI2 low - TX_OE_N deasserts, state preserved */
-0 0 1 0 0 0    HLLHHLHL
-
-/* 3.5: Verify DATA_TAKEN stayed high */
-0 1 1 0 0 0    HLLHHLHL
+/* PHI2=0: TX_OE_N returns H */
+0 0 1 0 0 0    HLHHLHHL
 
 /* ================================================================
  * TEST 4: TX Path - MCU sends another byte
  * ================================================================
- * DATA_TAKEN is currently 1, MCU can load next byte
  */
 
-/* 4.1: MCU loads another byte - TX_LOAD rising edge */
-/* TX_LOAD clears DATA_TAKEN, sets TX_AVAIL */
-0 1 1 0 1 0    HLLHHHLL
-0 1 1 0 0 0    HLLHHHLL
+/* 4.1: MCU pulses TX_LOAD - sets TX_AVAIL, clears DATA_TAKEN */
+0 1 1 0 1 0    HLHHHHLL
 
-/* 4.2: CPU reads it */
-1 0 1 0 0 0    LLHLHLHL
-0 0 1 0 0 0    HLLHHLHL
+/* TX_LOAD returns low */
+0 1 1 0 0 0    HLHHHHLL
+
+/* 4.2: CPU reads TX register */
+1 0 1 0 0 0    LLHLLHHL
+0 0 1 0 0 0    HLHHLHHL
 
 /* ================================================================
  * TEST 5: RX Path - CPU sends byte to MCU
  * ================================================================
- * RX_READY should be 1 (set during MCU init or after last ACK)
- * Sequence:
- *   1. CPU polls status, sees RX_READY=1
- *   2. CPU writes RX register -> RX_READY=0, DATA_WRITTEN=1
- *   3. MCU sees DATA_WRITTEN=1, reads byte
- *   4. MCU pulses RX_ACK -> RX_READY=1, DATA_WRITTEN=0
+ * RX_READY should be 1 from earlier initialization
  */
 
-/* First, let's reset to clean state for this test */
-/* MCU pulses RX_ACK to ensure RX_READY=1 */
-0 1 1 0 0 1    HLLHHLHL
-0 1 1 0 0 0    HLLHHLHL
+/* First ensure RX_READY=1 by pulsing RX_ACK */
+0 1 1 0 0 1    HLHHLHHL
+0 1 1 0 0 0    HLHHLHHL
 
-/* 5.1: CPU reads status to check RX_READY */
-1 0 1 1 0 0    HLLLLHLL
-0 0 1 1 0 0    HLLHHLHL
+/* 5.1: CPU reads status to verify RX_READY=1 */
+1 0 1 1 0 0    HLLLLHHL
+0 0 1 1 0 0    HLHHLHHL
 
-/* 5.2: CPU writes RX register (PHI2 high, CS low, A0=0, RW=0) */
-/* RX_CLK should go high, RX_READY clears, DATA_WRITTEN sets */
-1 0 0 0 0 0    HHLHLLHL
+/* 5.2: CPU writes RX register (PHI2=1, CS_N=0, A0=0, RW=0) */
+/* RX_CLK goes H, RX_READY clears, DATA_WRITTEN sets */
+1 0 0 0 0 0    HHHLLLLH
+0 0 0 0 0 0    HLHHLLLH
 
-/* PHI2 low - RX_CLK goes low, state preserved */
-0 0 0 0 0 0    HLLHLLHL
-
-/* 5.3: Verify DATA_WRITTEN is high, RX_READY is low */
-0 1 1 0 0 0    HLLHLLHL
-
-/* 5.4: MCU pulses RX_ACK after reading byte */
-/* DATA_WRITTEN clears, RX_READY sets */
-0 1 1 0 0 1    HLLHLHLL
-0 1 1 0 0 0    HLLHLHLL
+/* 5.3: MCU pulses RX_ACK - clears DATA_WRITTEN, sets RX_READY */
+0 1 1 0 0 1    HLHHLHLL
+0 1 1 0 0 0    HLHHLHLL
 
 /* ================================================================
- * TEST 6: RX Path - CPU tries to write when not ready
+ * TEST 6: Verify bus contention prevention
  * ================================================================
- * In proper operation, CPU should poll status first.
- * This test shows what happens during the write cycle.
+ * TX_OE_N and STATUS_OE_N should never both be L
  */
 
-/* CPU writes another byte */
-1 0 0 0 0 0    HHLHLLHL
-0 0 0 0 0 0    HLLHLLHL
+/* Read TX (A0=0): TX_OE_N=L, STATUS_OE_N=H */
+1 0 1 0 0 0    LLHLLHHL
+0 1 1 0 0 0    HLHHLHHL
 
-/* DATA_WRITTEN is high, RX_READY is low */
-/* CPU should poll and wait before writing again */
-
-/* MCU acknowledges */
-0 1 1 0 0 1    HLLHLHLL
-0 1 1 0 0 0    HLLHLHLL
+/* Read STATUS (A0=1): TX_OE_N=H, STATUS_OE_N=L */
+1 0 1 1 0 0    HLLLLHHL
+0 1 1 0 0 0    HLHHLHHL
 
 /* ================================================================
- * TEST 7: Bus contention prevention
- * ================================================================
- * TX_OE_N and STATUS_OE_N should never both be low
- * This is guaranteed by A0: TX requires A0=0, STATUS requires A0=1
- */
-
-/* Read TX (A0=0): TX_OE_N low, STATUS_OE_N high */
-1 0 1 0 0 0    LLHLHLHL
-0 0 1 0 0 0    HLLHHLHL
-
-/* Read STATUS (A0=1): TX_OE_N high, STATUS_OE_N low */
-1 0 1 1 0 0    HLLLHHLL
-0 0 1 1 0 0    HLLHHHLL
-
-/* ================================================================
- * TEST 8: No output enable when chip not selected
+ * TEST 7: Verify STATUS_CLK tracks PHI2
  * ================================================================
  */
 
-/* PHI2 high but CS_N=1 (not selected) */
-/* All OE signals should stay deasserted (high) */
-1 1 1 0 0 0    HLLLLHLL
-1 1 1 1 0 0    HLLLLHLL
-
-/* ================================================================
- * TEST 9: STATUS_CLK follows inverted PHI2
- * ================================================================
- */
-
-/* PHI2 low -> STATUS_CLK high (capturing status) */
-0 1 1 0 0 0    HLLHLHLL
-/* PHI2 high -> STATUS_CLK low */
-1 1 1 0 0 0    HLLLLHLL
-/* PHI2 low -> STATUS_CLK high */
-0 1 1 0 0 0    HLLHLHLL
-
-/* ================================================================
- * TEST 10: Rapid TX/RX interleave
- * ================================================================
- * Verify correct behavior with alternating operations
- */
-
-/* MCU sends (TX_LOAD) */
-0 1 1 0 1 0    HLLHHHLL
-0 1 1 0 0 0    HLLHHHLL
-
-/* CPU reads TX */
-1 0 1 0 0 0    LLHLHLHL
-0 0 1 0 0 0    HLLHHLHL
-
-/* CPU writes RX */
-1 0 0 0 0 0    HHLHLLHH
-0 0 0 0 0 0    HLLHLLHH
-
-/* MCU acknowledges RX and loads new TX simultaneously */
-/* (In practice would be sequenced, but test the logic) */
-0 1 1 0 1 1    HLLHHLHL
-0 1 1 0 0 0    HLLHHHLL
+/* PHI2=0 -> STATUS_CLK=H */
+0 1 1 0 0 0    HLHHLHHL
+/* PHI2=1 -> STATUS_CLK=L */
+1 1 1 0 0 0    HLHLLHHL
+/* PHI2=0 -> STATUS_CLK=H */
+0 1 1 0 0 0    HLHHLHHL
