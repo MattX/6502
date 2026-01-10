@@ -10,7 +10,13 @@ Device   v750c;
 
 /*
  * 6502-to-MCU Bus Interface CPLD
- * Target: ATF750LVC (PLCC28)
+ * Target: ATF750LVC (DIP24)
+ *
+ * DIP24 pinout:
+ *   Pins 1-11, 13: Inputs
+ *   Pin 12: GND
+ *   Pins 14-23: I/O (outputs)
+ *   Pin 24: VCC
  *
  * Provides two 8-bit data registers (TX and RX) with full handshaking
  * for asynchronous communication between 65C02 CPU and RP2040 MCU.
@@ -36,16 +42,13 @@ PIN 6  = TX_LOAD;   /* MCU pulses high to load TX latch */
 PIN 7  = RX_ACK;    /* MCU pulses high to acknowledge RX read */
 
 /* ======================== OUTPUT PINS ======================= */
-/*
- * ATF750LVC PLCC28 valid I/O pins: 15-21, 25-27
- * Pins 22-24 are input-only on this device.
- */
+/* DIP24: I/O pins are 14-23 */
 
 /* Combinatorial outputs */
-PIN 15 = TX_OE_N;       /* Enable TX latch outputs onto 6502 bus (active low) */
-PIN 16 = RX_CLK;        /* Clock CPU write data into RX latch */
-PIN 17 = STATUS_OE_N;   /* Enable status latch outputs onto 6502 bus (active low) */
-PIN 26 = STATUS_CLK;    /* Clock status bits into status latch */
+PIN 14 = TX_OE_N;       /* Enable TX latch outputs onto 6502 bus (active low) */
+PIN 15 = RX_CLK;        /* Clock CPU write data into RX latch */
+PIN 16 = STATUS_OE_N;   /* Enable status latch outputs onto 6502 bus (active low) */
+PIN 17 = STATUS_CLK;    /* Clock status bits into status latch */
 
 /* Registered outputs */
 PIN 18 = TX_AVAIL;      /* To status latch D7: MCU data available */
