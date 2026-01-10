@@ -282,7 +282,7 @@ The CPU presents data before PHI2↑. The CPLD generates RX_CLK from (PHI2 AND d
 | 19 | RX_READY | To status latch pin 17 (D6) — registered |
 | 20 | DATA_TAKEN | To MCU GPIO — registered |
 | 21 | DATA_WRITTEN | To MCU GPIO — registered |
-| 27 | STATUS_CLK | To status latch pin 11 (CLK) — combinatorial |
+| 26 | STATUS_CLK | To status latch pin 11 (CLK) — combinatorial |
 
 ### Power
 
@@ -325,7 +325,7 @@ The CPU presents data before PHI2↑. The CPLD generates RX_CLK from (PHI2 AND d
 | 9 (D7) | TX_AVAIL | CPLD pin 18 |
 | 8 (D6) | RX_READY | CPLD pin 19 |
 | 2-7 (D0-D5) | GND | tied low |
-| 11 (CLK) | STATUS_CLK | CPLD pin 27 |
+| 11 (CLK) | STATUS_CLK | CPLD pin 26 |
 | 12-19 (Q0-Q7) | D[0:7] | 6502 data bus |
 | 10 | GND | — |
 | 20 | VCC | 3.3V |
