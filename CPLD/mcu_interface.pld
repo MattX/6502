@@ -1,0 +1,144 @@
+Name     MCU_6502_Interface;
+PartNo   001;
+Date     2024-01-09;
+Revision 02;
+Designer ;
+Company  ;
+Assembly ;
+Location ;
+Device   v750c;
+
+/*
+ * 6502-to-MCU Bus Interface CPLD
+ * Target: ATF750LVC (DIP24)
+ *
+ * DIP24 pinout:
+ *   Pins 1-11, 13: Inputs
+ *   Pin 12: GND
+ *   Pins 14-23: I/O (outputs)
+ *   Pin 24: VCC
+ *
+ * Provides two 8-bit data registers (TX and RX) with full handshaking
+ * for asynchronous communication between 65C02 CPU and RP2040 MCU.
+ *
+ * External latches:
+ *   74HC574 #1 (TX): MCU -> CPU data path
+ *   74HC574 #2 (RX): CPU -> MCU data path
+ *   74HC574 #3 (Status): Status bits to CPU
+ *
+ * IMPORTANT: MCU firmware must pulse RX_ACK at startup to initialize
+ * RX_READY to 1 (device powers up with registers at 0).
+ *
+ * Reference: 6502_mcu_interface_spec.md
+ */
+
+/* ======================== INPUT PINS ======================== */
+PIN 1  = CLK;       /* Global clock - tie to GND (not used) */
+PIN 2  = PHI2;      /* 6502 system clock */
+PIN 3  = CS_N;      /* Chip select from address decoder (active low) */
+PIN 4  = RW;        /* 6502 Read/Write: 1=read, 0=write */
+PIN 5  = A0;        /* Register select: 0=data (RX/TX), 1=status */
+PIN 6  = TX_LOAD;   /* MCU pulses high to load TX latch */
+PIN 7  = RX_ACK;    /* MCU pulses high to acknowledge RX read */
+
+/* ======================== OUTPUT PINS ======================= */
+/* DIP24: I/O pins are 14-23 */
+
+/* Combinatorial outputs */
+PIN 14 = TX_OE_N;       /* Enable TX latch outputs onto 6502 bus (active low) */
+PIN 15 = RX_CLK;        /* Clock CPU write data into RX latch */
+PIN 16 = STATUS_OE_N;   /* Enable status latch outputs onto 6502 bus (active low) */
+PIN 17 = STATUS_CLK;    /* Clock status bits into status latch */
+
+/* Registered outputs */
+PIN 18 = TX_AVAIL;      /* To status latch D7: MCU data available */
+PIN 19 = RX_READY;      /* To status latch D6: RX register empty */
+PIN 20 = DATA_TAKEN;    /* To MCU: CPU has read TX byte */
+PIN 21 = DATA_WRITTEN;  /* To MCU: CPU has written RX byte */
+
+/* ======================== INTERMEDIATE TERMS ================ */
+/* CPU bus cycle decode - active during valid portion of bus cycle */
+TX_READ    = PHI2 & !CS_N & !A0 & RW;   /* CPU reading TX data register */
+RX_WRITE   = PHI2 & !CS_N & !A0 & !RW;  /* CPU writing RX data register */
+STATUS_READ = PHI2 & !CS_N & A0 & RW;   /* CPU reading status register */
+
+/* ======================== COMBINATORIAL OUTPUTS ============= */
+
+/*
+ * TX_OE_N: Enable TX latch outputs when CPU reads TX register
+ * Active low output - directly drives 74HC574 OE pin
+ */
+TX_OE_N = !TX_READ;
+
+/*
+ * RX_CLK: Generate clock edge to capture CPU data into RX latch
+ * 74HC574 latches on rising edge
+ * Signal rises when RX_WRITE becomes true (PHI2 rises during write cycle)
+ */
+RX_CLK = RX_WRITE;
+
+/*
+ * STATUS_OE_N: Enable status latch outputs when CPU reads status
+ * Active low output - directly drives 74HC574 OE pin
+ */
+STATUS_OE_N = !STATUS_READ;
+
+/*
+ * STATUS_CLK: Clock status register to capture TX_AVAIL and RX_READY
+ * Using inverted PHI2 ensures status is captured on PHI2 falling edge,
+ * so values are stable well before the next CPU read on PHI2 rising edge.
+ */
+STATUS_CLK = !PHI2;
+
+/* ======================== REGISTERED OUTPUTS ================ */
+/*
+ * Handshake state flip-flops.
+ *
+ * The ATF750 doesn't support async preset (.ap), only async reset (.ar).
+ * We implement "set on A, clear on B" by using A as the clock with D=1,
+ * and B as the async reset:
+ *   - Rising edge of A clocks in D=1, setting the output
+ *   - B going high asynchronously resets the output to 0
+ *
+ * TIMING NOTE: TX_LOAD and RX_ACK must be brief pulses from MCU.
+ */
+
+/*
+ * TX_AVAIL: Indicates MCU has sent data for CPU to read
+ *   Set:   Rising edge of TX_LOAD (MCU loads TX latch)
+ *   Clear: TX_READ high (CPU reads TX register)
+ *   Power-on: 0 (no data available)
+ */
+TX_AVAIL.ck = TX_LOAD;
+TX_AVAIL.d  = 'b'1;
+TX_AVAIL.ar = TX_READ;
+
+/*
+ * RX_READY: Indicates RX register is empty, CPU may write
+ *   Set:   Rising edge of RX_ACK (MCU acknowledges)
+ *   Clear: RX_WRITE high (CPU writes RX register)
+ *   Power-on: 0 (device default), MCU must pulse RX_ACK at init
+ */
+RX_READY.ck = RX_ACK;
+RX_READY.d  = 'b'1;
+RX_READY.ar = RX_WRITE;
+
+/*
+ * DATA_TAKEN: Signals to MCU that CPU has read the TX byte
+ *   Set:   Rising edge of TX_READ (CPU reads TX register)
+ *   Clear: TX_LOAD high (MCU loading next byte)
+ *   Power-on: 0
+ */
+DATA_TAKEN.ck = TX_READ;
+DATA_TAKEN.d  = 'b'1;
+DATA_TAKEN.ar = TX_LOAD;
+
+/*
+ * DATA_WRITTEN: Signals to MCU that CPU has written an RX byte
+ *   Set:   Rising edge of RX_WRITE (CPU writes RX register)
+ *   Clear: RX_ACK high (MCU acknowledges)
+ *   Power-on: 0
+ */
+DATA_WRITTEN.ck = RX_WRITE;
+DATA_WRITTEN.d  = 'b'1;
+DATA_WRITTEN.ar = RX_ACK;

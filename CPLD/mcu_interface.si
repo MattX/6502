@@ -1,0 +1,145 @@
+Name     MCU_6502_Interface;
+PartNo   001;
+Date     2024-01-09;
+Revision 02;
+Designer ;
+Company  ;
+Assembly ;
+Location ;
+
+/*
+ * Test vectors for 6502-to-MCU Bus Interface CPLD
+ *
+ * Signal conventions:
+ *   0 = low, 1 = high, X = don't care
+ *   L = output expected low, H = output expected high
+ *
+ * Output equations:
+ *   TX_OE_N     = !(PHI2 & !CS_N & !A0 & RW)   -- active LOW during TX read
+ *   RX_CLK      = PHI2 & !CS_N & !A0 & !RW     -- HIGH during RX write
+ *   STATUS_OE_N = !(PHI2 & !CS_N & A0 & RW)    -- active LOW during status read
+ *   STATUS_CLK  = !PHI2                         -- HIGH when PHI2 low
+ *   TX_AVAIL    = set on TX_LOAD rising, cleared on TX_READ
+ *   RX_READY    = set on RX_ACK rising, cleared on RX_WRITE
+ *   DATA_TAKEN  = set on TX_READ rising, cleared on TX_LOAD
+ *   DATA_WRITTEN = set on RX_WRITE rising, cleared on RX_ACK
+ */
+
+ORDER: PHI2, CS_N, RW, A0, TX_LOAD, RX_ACK,
+       TX_OE_N, RX_CLK, STATUS_OE_N, STATUS_CLK,
+       TX_AVAIL, RX_READY, DATA_TAKEN, DATA_WRITTEN;
+
+VECTORS:
+
+/* ================================================================
+ * TEST 1: Power-on state
+ * ================================================================
+ * All flip-flops start at 0: TX_AVAIL=0, RX_READY=0, DATA_TAKEN=0, DATA_WRITTEN=0
+ * PHI2=0: STATUS_CLK=H (inverted), all OE signals inactive (H)
+ */
+
+/* Idle: PHI2=0, CS_N=1 (not selected) */
+0 1 1 0 0 0    HLHHLLLL
+
+/* PHI2=1, CS_N=1 (still not selected) - STATUS_CLK goes L */
+1 1 1 0 0 0    HLHLLLLL
+
+/* ================================================================
+ * TEST 2: MCU initialization - pulse RX_ACK to set RX_READY=1
+ * ================================================================
+ */
+
+/* PHI2=0, RX_ACK rising edge sets RX_READY */
+0 1 1 0 0 1    HLHHLHLL
+
+/* RX_ACK returns low, RX_READY stays set */
+0 1 1 0 0 0    HLHHLHLL
+
+/* ================================================================
+ * TEST 3: TX Path - MCU sends byte to CPU
+ * ================================================================
+ */
+
+/* 3.1: MCU pulses TX_LOAD - sets TX_AVAIL, clears DATA_TAKEN */
+0 1 1 0 1 0    HLHHHHLL
+
+/* TX_LOAD returns low, TX_AVAIL stays set */
+0 1 1 0 0 0    HLHHHHLL
+
+/* 3.2: CPU reads status (PHI2=1, CS_N=0, A0=1, RW=1) */
+/* STATUS_OE_N goes L, STATUS_CLK goes L */
+1 0 1 1 0 0    HLLLHHLL
+
+/* PHI2=0: STATUS_OE_N returns H, STATUS_CLK returns H */
+0 0 1 1 0 0    HLHHHHLL
+
+/* 3.3: CPU reads TX register (PHI2=1, CS_N=0, A0=0, RW=1) */
+/* TX_OE_N goes L, TX_AVAIL clears, DATA_TAKEN sets */
+1 0 1 0 0 0    LLHLLHHL
+
+/* PHI2=0: TX_OE_N returns H */
+0 0 1 0 0 0    HLHHLHHL
+
+/* ================================================================
+ * TEST 4: TX Path - MCU sends another byte
+ * ================================================================
+ */
+
+/* 4.1: MCU pulses TX_LOAD - sets TX_AVAIL, clears DATA_TAKEN */
+0 1 1 0 1 0    HLHHHHLL
+
+/* TX_LOAD returns low */
+0 1 1 0 0 0    HLHHHHLL
+
+/* 4.2: CPU reads TX register */
+1 0 1 0 0 0    LLHLLHHL
+0 0 1 0 0 0    HLHHLHHL
+
+/* ================================================================
+ * TEST 5: RX Path - CPU sends byte to MCU
+ * ================================================================
+ * RX_READY should be 1 from earlier initialization
+ */
+
+/* First ensure RX_READY=1 by pulsing RX_ACK */
+0 1 1 0 0 1    HLHHLHHL
+0 1 1 0 0 0    HLHHLHHL
+
+/* 5.1: CPU reads status to verify RX_READY=1 */
+1 0 1 1 0 0    HLLLLHHL
+0 0 1 1 0 0    HLHHLHHL
+
+/* 5.2: CPU writes RX register (PHI2=1, CS_N=0, A0=0, RW=0) */
+/* RX_CLK goes H, RX_READY clears, DATA_WRITTEN sets */
+1 0 0 0 0 0    HHHLLLLH
+0 0 0 0 0 0    HLHHLLLH
+
+/* 5.3: MCU pulses RX_ACK - clears DATA_WRITTEN, sets RX_READY */
+0 1 1 0 0 1    HLHHLHLL
+0 1 1 0 0 0    HLHHLHLL
+
+/* ================================================================
+ * TEST 6: Verify bus contention prevention
+ * ================================================================
+ * TX_OE_N and STATUS_OE_N should never both be L
+ */
+
+/* Read TX (A0=0): TX_OE_N=L, STATUS_OE_N=H */
+1 0 1 0 0 0    LLHLLHHL
+0 1 1 0 0 0    HLHHLHHL
+
+/* Read STATUS (A0=1): TX_OE_N=H, STATUS_OE_N=L */
+1 0 1 1 0 0    HLLLLHHL
+0 1 1 0 0 0    HLHHLHHL
+
+/* ================================================================
+ * TEST 7: Verify STATUS_CLK tracks PHI2
+ * ================================================================
+ */
+
+/* PHI2=0 -> STATUS_CLK=H */
+0 1 1 0 0 0    HLHHLHHL
+/* PHI2=1 -> STATUS_CLK=L */
+1 1 1 0 0 0    HLHLLHHL
+/* PHI2=0 -> STATUS_CLK=H */
+0 1 1 0 0 0    HLHHLHHL
