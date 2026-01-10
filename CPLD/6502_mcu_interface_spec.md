@@ -275,14 +275,14 @@ The CPU presents data before PHI2↑. The CPLD generates RX_CLK from (PHI2 AND d
 
 | Pin | Signal | Notes |
 |-----|--------|-------|
+| 15 | TX_OE_N | To TX latch pin 1 (OE̅) — combinatorial |
+| 16 | RX_CLK | To RX latch pin 11 (CLK) — combinatorial |
+| 17 | STATUS_OE_N | To status latch pin 1 (OE̅) — combinatorial |
 | 18 | TX_AVAIL | To status latch pin 18 (D7) — registered |
 | 19 | RX_READY | To status latch pin 17 (D6) — registered |
 | 20 | DATA_TAKEN | To MCU GPIO — registered |
 | 21 | DATA_WRITTEN | To MCU GPIO — registered |
-| 22 | TX_OE_N | To TX latch pin 1 (OE̅) — combinatorial |
-| 23 | RX_CLK | To RX latch pin 11 (CLK) — combinatorial |
-| 24 | STATUS_OE_N | To status latch pin 1 (OE̅) — combinatorial |
-| 25 | STATUS_CLK | To status latch pin 11 (CLK) — combinatorial |
+| 27 | STATUS_CLK | To status latch pin 11 (CLK) — combinatorial |
 
 ### Power
 
@@ -299,7 +299,7 @@ The CPU presents data before PHI2↑. The CPLD generates RX_CLK from (PHI2 AND d
 
 | 74HC574 Pin | Signal | Source |
 |-------------|--------|--------|
-| 1 (OE̅) | TX_OE_N | CPLD pin 22 |
+| 1 (OE̅) | TX_OE_N | CPLD pin 15 |
 | 2-9 (D0-D7) | MCU_DATA[0:7] | MCU GPIO |
 | 11 (CLK) | TX_LOAD | MCU GPIO |
 | 12-19 (Q0-Q7) | D[0:7] | 6502 data bus |
@@ -312,7 +312,7 @@ The CPU presents data before PHI2↑. The CPLD generates RX_CLK from (PHI2 AND d
 |-------------|--------|--------|
 | 1 (OE̅) | MCU_DIR | MCU GPIO (assert low to read) |
 | 2-9 (D0-D7) | D[0:7] | 6502 data bus |
-| 11 (CLK) | RX_CLK | CPLD pin 23 |
+| 11 (CLK) | RX_CLK | CPLD pin 16 |
 | 12-19 (Q0-Q7) | MCU_DATA[0:7] | MCU GPIO |
 | 10 | GND | — |
 | 20 | VCC | 3.3V |
@@ -321,11 +321,11 @@ The CPU presents data before PHI2↑. The CPLD generates RX_CLK from (PHI2 AND d
 
 | 74HC574 Pin | Signal | Source |
 |-------------|--------|--------|
-| 1 (OE̅) | STATUS_OE_N | CPLD pin 24 |
+| 1 (OE̅) | STATUS_OE_N | CPLD pin 17 |
 | 9 (D7) | TX_AVAIL | CPLD pin 18 |
 | 8 (D6) | RX_READY | CPLD pin 19 |
 | 2-7 (D0-D5) | GND | tied low |
-| 11 (CLK) | STATUS_CLK | CPLD pin 25 |
+| 11 (CLK) | STATUS_CLK | CPLD pin 27 |
 | 12-19 (Q0-Q7) | D[0:7] | 6502 data bus |
 | 10 | GND | — |
 | 20 | VCC | 3.3V |

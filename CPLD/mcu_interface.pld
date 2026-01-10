@@ -36,17 +36,22 @@ PIN 6  = TX_LOAD;   /* MCU pulses high to load TX latch */
 PIN 7  = RX_ACK;    /* MCU pulses high to acknowledge RX read */
 
 /* ======================== OUTPUT PINS ======================= */
-/* Registered outputs on pins 18-21 (macrocell pins with flip-flops) */
+/*
+ * ATF750LVC PLCC28 valid I/O pins: 15-21, 25-27
+ * Pins 22-24 are input-only on this device.
+ */
+
+/* Combinatorial outputs */
+PIN 15 = TX_OE_N;       /* Enable TX latch outputs onto 6502 bus (active low) */
+PIN 16 = RX_CLK;        /* Clock CPU write data into RX latch */
+PIN 17 = STATUS_OE_N;   /* Enable status latch outputs onto 6502 bus (active low) */
+PIN 27 = STATUS_CLK;    /* Clock status bits into status latch */
+
+/* Registered outputs */
 PIN 18 = TX_AVAIL;      /* To status latch D7: MCU data available */
 PIN 19 = RX_READY;      /* To status latch D6: RX register empty */
 PIN 20 = DATA_TAKEN;    /* To MCU: CPU has read TX byte */
 PIN 21 = DATA_WRITTEN;  /* To MCU: CPU has written RX byte */
-
-/* Combinatorial outputs on pins 22-25 */
-PIN 22 = TX_OE_N;       /* Enable TX latch outputs onto 6502 bus (active low) */
-PIN 23 = RX_CLK;        /* Clock CPU write data into RX latch */
-PIN 24 = STATUS_OE_N;   /* Enable status latch outputs onto 6502 bus (active low) */
-PIN 25 = STATUS_CLK;    /* Clock status bits into status latch */
 
 /* ======================== INTERMEDIATE TERMS ================ */
 /* CPU bus cycle decode - active during valid portion of bus cycle */
