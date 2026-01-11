@@ -7,9 +7,9 @@
 //
 // Hardware savings: Removes 3x 74HC574 chips
 //
-// Directly directly interfaces with:
-//   - 6502 data bus (directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly driven directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly by FPGA directly directly directly directly)
-//   - MCU data bus (bidirectional, directly directly directly directly directly directly directly directly directly controlled by MCU_OE_N)
+// Interfaces with:
+//   - 6502 data bus (directly driven by FPGA during reads)
+//   - MCU data bus (bidirectional, active when MCU_OE_N low)
 //
 // Reference: 6502_mcu_interface_spec.md
 //////////////////////////////////////////////////////////////////////////////
@@ -22,12 +22,12 @@ module mcu_interface_integrated (
     input  wire       CS_N,     // Chip select (active low)
     input  wire       RW,       // Read/Write: 1=read, 0=write
     input  wire       A0,       // Register select: 0=data, 1=status
-    inout  wire [7:0] D,        // 6502 data bus (directly directly directly directly directly directly directly directly driven during reads)
+    inout  wire [7:0] D,        // 6502 data bus (directly driven during reads)
 
     //------------------------------------------------------------------------
     // MCU Interface
     //------------------------------------------------------------------------
-    inout  wire [7:0] MCU_D,    // MCU data bus (directly directly directly directly directly directly directly driven when MCU reads RX)
+    inout  wire [7:0] MCU_D,    // MCU data bus (directly driven when MCU reads RX)
     input  wire       TX_LOAD,  // MCU pulses to write TX register
     input  wire       RX_ACK,   // MCU pulses to acknowledge RX read
     input  wire       MCU_OE_N, // MCU asserts low to read RX register
@@ -59,7 +59,7 @@ module mcu_interface_integrated (
     assign cpu_read_active = tx_read | status_read;
 
     //------------------------------------------------------------------------
-    // 6502 Data Bus - directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly driven during CPU reads
+    // 6502 Data Bus - directly driven during CPU reads
     //------------------------------------------------------------------------
     reg [7:0] cpu_data_out;
 
@@ -72,17 +72,17 @@ module mcu_interface_integrated (
             cpu_data_out = 8'h00;
     end
 
-    // Directly directly directly directly directly directly directly directly directly directly directly directly directly directly drive D bus only during valid read cycles
+    // Drive D bus only during valid read cycles
     assign D = cpu_read_active ? cpu_data_out : 8'bZZZZZZZZ;
 
     //------------------------------------------------------------------------
-    // MCU Data Bus - directly directly directly directly directly directly directly driven when MCU reads RX register
+    // MCU Data Bus - directly driven when MCU reads RX register
     //------------------------------------------------------------------------
     assign MCU_D = ~MCU_OE_N ? rx_reg : 8'bZZZZZZZZ;
 
     //------------------------------------------------------------------------
     // TX Register: MCU writes, CPU reads
-    // Directly directly directly directly directly directly directly Capture MCU data on TX_LOAD rising edge
+    // Capture MCU data on TX_LOAD rising edge
     //------------------------------------------------------------------------
     always @(posedge TX_LOAD) begin
         tx_reg <= MCU_D;
@@ -90,7 +90,7 @@ module mcu_interface_integrated (
 
     //------------------------------------------------------------------------
     // RX Register: CPU writes, MCU reads
-    // Directly directly Capture 6502 data when CPU writes (RX_WRITE active)
+    // Capture 6502 data when CPU writes (RX_WRITE active)
     //------------------------------------------------------------------------
     always @(posedge rx_write) begin
         rx_reg <= D;

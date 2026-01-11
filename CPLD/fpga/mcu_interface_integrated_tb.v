@@ -24,7 +24,7 @@ module mcu_interface_integrated_tb;
     wire       DATA_TAKEN;
     wire       DATA_WRITTEN;
 
-    // Directly directly directly directly directly directly directly directly directly Directly directly directly drive directly directly directly directly data buses
+    // Directly drive data buses from testbench when needed
     assign D = D_oe ? D_drive : 8'bZZZZZZZZ;
     assign MCU_D = MCU_D_oe ? MCU_D_drive : 8'bZZZZZZZZ;
 

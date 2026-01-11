@@ -3,11 +3,11 @@
 ## Target: Digilent Cmod A7
 ##
 ## This version requires more I/O pins due to the two 8-bit data buses:
-##   - 8 pins for 6502 data bus (directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly bidirectional)
+##   - 8 pins for 6502 data bus (directly driven during reads)
 ##   - 8 pins for MCU data bus (bidirectional)
 ##   - 4 pins for 6502 control (PHI2, CS_N, RW, A0)
-##   - 4 pins for MCU control (TX_LOAD, RX_ACK, MCU_OE_N, DATA_TAKEN, DATA_WRITTEN)
-##   Total: 24 I/O pins
+##   - 5 pins for MCU control (TX_LOAD, RX_ACK, MCU_OE_N, DATA_TAKEN, DATA_WRITTEN)
+##   Total: 25 I/O pins
 ##
 ## The Cmod A7 has 44 digital I/O pins, so this fits easily.
 ##
@@ -15,7 +15,7 @@
 ##############################################################################
 
 ##############################################################################
-## 6502 Data Bus (directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly Directly directly driven during CPU reads)
+## 6502 Data Bus (directly driven during CPU reads)
 ##############################################################################
 set_property -dict { PACKAGE_PIN M3  IOSTANDARD LVCMOS33 } [get_ports { D[0] }]
 set_property -dict { PACKAGE_PIN L3  IOSTANDARD LVCMOS33 } [get_ports { D[1] }]
@@ -35,7 +35,7 @@ set_property -dict { PACKAGE_PIN B17 IOSTANDARD LVCMOS33 } [get_ports { RW }]
 set_property -dict { PACKAGE_PIN B16 IOSTANDARD LVCMOS33 } [get_ports { A0 }]
 
 ##############################################################################
-## MCU Data Bus (directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly directly Directly driven when MCU reads RX)
+## MCU Data Bus (directly driven when MCU reads RX)
 ##############################################################################
 set_property -dict { PACKAGE_PIN C17 IOSTANDARD LVCMOS33 } [get_ports { MCU_D[0] }]
 set_property -dict { PACKAGE_PIN D18 IOSTANDARD LVCMOS33 } [get_ports { MCU_D[1] }]
