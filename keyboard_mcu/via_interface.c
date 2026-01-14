@@ -15,8 +15,8 @@
 static const uint8_t DATA_PINS[8] = {26, 27, 28, 29, 24, 25, 18, 19};
 
 // Handshake pins (GPIO0/1 reserved for UART console output)
-#define CA1_PIN 3  // Output: pulse low to signal CPU that data is ready
-#define CA2_PIN 4  // Input: falling edge indicates CPU has read data
+#define CA1_PIN 2  // Output: pulse low to signal CPU that data is ready
+#define CA2_PIN 3  // Input: falling edge indicates CPU has read data
 
 //--------------------------------------------------------------------+
 // Keystroke Buffer (circular buffer)
