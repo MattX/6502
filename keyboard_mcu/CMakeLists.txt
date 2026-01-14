@@ -34,7 +34,7 @@ target_include_directories(host_cdc_msc_hid PUBLIC
 
 # In addition to pico_stdlib required for common PicoSDK functionality, add dependency on tinyusb_host
 # for TinyUSB device support and tinyusb_board for the additional board support library used by the example
-target_link_libraries(host_cdc_msc_hid PUBLIC pico_status_led pico_stdlib hardware_gpio tinyusb_host tinyusb_board)
+target_link_libraries(host_cdc_msc_hid PUBLIC pico_status_led pico_stdlib hardware_gpio hardware_uart tinyusb_host tinyusb_board)
 
 # Create map/bin/hex/uf2 files
 pico_add_extra_outputs(host_cdc_msc_hid)

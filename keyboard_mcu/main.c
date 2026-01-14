@@ -27,10 +27,19 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "pico/stdlib.h"
 #include "pico/status_led.h"
+#include "hardware/uart.h"
+#include "hardware/gpio.h"
 #include "bsp/board_api.h"
 #include "tusb.h"
 #include "via_interface.h"
+
+// UART Console Configuration
+#define UART_ID uart0
+#define UART_BAUD_RATE 115200
+#define UART_TX_PIN 0
+#define UART_RX_PIN 1
 
 //--------------------------------------------------------------------+
 // MACRO CONSTANT TYPEDEF PROTYPES
@@ -66,6 +75,17 @@ extern bool tuh_max3421_reg_write(uint8_t rhport, uint8_t reg, uint8_t data, boo
 int main(void) {
   board_init();
 
+  // Initialize UART for console output on GPIO0 (TX) and GPIO1 (RX)
+  uart_init(UART_ID, UART_BAUD_RATE);
+  gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
+  gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
+
+  printf("\r\n");
+  printf("======================================\r\n");
+  printf("  6502 Keyboard MCU - RP2040\r\n");
+  printf("  UART Console on GPIO0/GPIO1\r\n");
+  printf("  Baud: %d\r\n", UART_BAUD_RATE);
+  printf("======================================\r\n");
   printf("TinyUSB Host HID Keyboard Example\r\n");
 
   // Initialize status LED - MUST be called before using LED functions
