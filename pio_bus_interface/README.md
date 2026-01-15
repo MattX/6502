@@ -135,17 +135,25 @@ The output `pio_bus_interface.uf2` can be flashed to a Pico by holding BOOTSEL a
 
 ## Timing Analysis
 
-At 125MHz PIO clock with a 5MHz 6502:
+At 125MHz PIO clock:
 
-| Operation | PIO Cycles | Time | PHI2 High | Margin |
-|-----------|-----------|------|-----------|--------|
-| Data Read | 10 | 80ns | 100ns | 20ns |
-| Status Read | 12 | 96ns | 100ns | 4ns |
-| Data Write | 8 | 64ns | 100ns | 36ns |
+| Operation | PIO Cycles | Time | Notes |
+|-----------|-----------|------|-------|
+| Data Read | 12 | 96ns | Decode + output + enable |
+| Status Read | 14 | 112ns | Longest path |
+| Data Write | 8 | 64ns | Fastest path |
 
-For more conservative timing, consider:
-- Running 6502 at 4MHz (125ns PHI2 high)
-- Overclocking RP2040 to 150MHz+ (reduces PIO cycle time)
+**Recommended 6502 clock: 4MHz** (125ns PHI2 high window)
+
+| 6502 Clock | PHI2 High | Status Read Margin |
+|------------|-----------|-------------------|
+| 4MHz | 125ns | 13ns |
+| 5MHz | 100ns | -12ns (too tight!) |
+| 3.58MHz | 140ns | 28ns (comfortable) |
+
+For 5MHz operation, consider:
+- Overclocking RP2040 to 150MHz+ (reduces cycle time to 6.7ns)
+- Using sideset with external buffer for faster output enable
 
 ## Status Register Implementation
 

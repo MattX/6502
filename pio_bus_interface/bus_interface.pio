@@ -19,17 +19,18 @@
 ;
 ; Configuration requirements:
 ;   - jmp_pin = GPIO 9 (CS_N)
-;   - in_base = 0, out_base = 0, set_base = 0
-;   - set_count = 8 (for pindirs control)
+;   - in_base = 0, out_base = 0
 ;   - out_shift_right = true (default)
 ;   - EXECCTRL.STATUS_SEL = 0 (TX FIFO level)
 ;   - EXECCTRL.STATUS_N = 1 (threshold = 1)
 ;
-; Timing analysis (at 125MHz PIO clock, 5MHz 6502):
-;   - PHI2 high time: ~100ns = 12.5 PIO cycles
-;   - Data read path: 10 cycles = 80ns (20ns margin)
-;   - Status read path: 12 cycles = 96ns (4ns margin, tight but OK)
-;   - Data write path: 8 cycles = 64ns (36ns margin)
+; Timing analysis (at 125MHz PIO clock):
+;   - Data read path: 12 cycles = 96ns
+;   - Status read path: 14 cycles = 112ns
+;   - Data write path: 8 cycles = 64ns
+;
+; Recommended 6502 clock: 4MHz (125ns PHI2 high) for adequate margin.
+; At 5MHz (100ns PHI2 high), timing is marginal for status reads.
 ;
 
 .program bus_interface
@@ -58,32 +59,36 @@ wait_cycle:
 do_data_read:
     pull noblock                ; [9] Get byte from TX FIFO (stale if empty)
     out pins, 8                 ; [10] Drive data onto D[7:0]
-    set pindirs, 0xFF           ; [11] Enable outputs
-    wait 0 gpio 8               ; [12] Hold until PHI2 falls
-    set pindirs, 0x00           ; [13] Release bus (high-Z)
-    jmp wait_cycle              ; [14]
+    mov osr, ~null              ; [11] OSR = 0xFFFFFFFF
+    out pindirs, 8              ; [12] Enable outputs (D[7:0] = outputs)
+    wait 0 gpio 8               ; [13] Hold until PHI2 falls
+    mov osr, null               ; [14] OSR = 0
+    out pindirs, 8              ; [15] Release bus (D[7:0] = inputs)
+    jmp wait_cycle              ; [16]
 
 check_status:
-    set y, 3                    ; [15]
-    jmp x!=y wait_phi2_low      ; [16] x=1 -> reserved, skip
+    set y, 3                    ; [17]
+    jmp x!=y wait_phi2_low      ; [18] x=1 -> reserved, skip
 
     ; === x=3: Status read ===
 do_status_read:
-    mov osr, ~status            ; [17] 0x00 if TX empty, 0xFF if TX has data
-    out pins, 8                 ; [18] Drive status onto D[7:0]
-    set pindirs, 0xFF           ; [19] Enable outputs
-    wait 0 gpio 8               ; [20] Hold until PHI2 falls
-    set pindirs, 0x00           ; [21] Release bus
-    jmp wait_cycle              ; [22]
+    mov osr, ~status            ; [19] 0x00 if TX empty, 0xFF if TX has data
+    out pins, 8                 ; [20] Drive status onto D[7:0]
+    mov osr, ~null              ; [21] OSR = 0xFFFFFFFF
+    out pindirs, 8              ; [22] Enable outputs
+    wait 0 gpio 8               ; [23] Hold until PHI2 falls
+    mov osr, null               ; [24] OSR = 0
+    out pindirs, 8              ; [25] Release bus
+    jmp wait_cycle              ; [26]
 
     ; === x=0: Data write (CPU -> MCU) ===
 do_data_write:
-    in pins, 8                  ; [23] Sample D[7:0] into ISR
-    push                        ; [24] Send to RX FIFO
+    in pins, 8                  ; [27] Sample D[7:0] into ISR
+    push                        ; [28] Send to RX FIFO
     ; Fall through to wait_phi2_low
 
 wait_phi2_low:
-    wait 0 gpio 8               ; [25] Wait for PHI2 to go low
+    wait 0 gpio 8               ; [29] Wait for PHI2 to go low
 .wrap
 
 % c-sdk {
@@ -103,8 +108,7 @@ static inline void bus_interface_program_init(PIO pio, uint sm, uint offset) {
 
     // Configure pin mappings
     sm_config_set_in_pins(&c, BUS_PIN_D0);      // IN starts at D0
-    sm_config_set_out_pins(&c, BUS_PIN_D0, 8);  // OUT to D[7:0]
-    sm_config_set_set_pins(&c, BUS_PIN_D0, 8);  // SET controls D[7:0] pindirs
+    sm_config_set_out_pins(&c, BUS_PIN_D0, 8);  // OUT to D[7:0] (pins and pindirs)
     sm_config_set_jmp_pin(&c, BUS_PIN_CS_N);    // JMP PIN uses CS_N
 
     // Configure shift directions (right shift for both, which is default)
