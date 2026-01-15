@@ -1,0 +1,15 @@
+# Build directory
+build/
+
+# IDE files
+.vscode/
+*.swp
+*~
+
+# Generated files
+*.elf
+*.uf2
+*.bin
+*.hex
+*.map
+*.dis

@@ -1,0 +1,160 @@
+;
+; PIO-based 6502 Bus Interface
+;
+; This PIO program implements a memory-mapped register interface for the 6502 CPU,
+; replacing the CPLD + latches design with pure PIO logic.
+;
+; Pin mapping:
+;   GPIO 0-7:   D[7:0] - bidirectional data bus
+;   GPIO 8:     PHI2   - 6502 system clock
+;   GPIO 9:     CS_N   - chip select (directly controls JMP PIN)
+;   GPIO 10:    A0     - address bit 0 (register select)
+;   GPIO 11:    RW     - read/write (1=read, 0=write)
+;
+; Register map (from 6502 perspective):
+;   A0=0, R:  Read data byte from MCU (TX path)
+;   A0=0, W:  Write data byte to MCU (RX path)
+;   A0=1, R:  Status register (D7=TX_AVAIL, D6-D0=don't care)
+;   A0=1, W:  Reserved (no operation)
+;
+; Configuration requirements:
+;   - jmp_pin = GPIO 9 (CS_N)
+;   - in_base = 0, out_base = 0, set_base = 0
+;   - set_count = 8 (for pindirs control)
+;   - out_shift_right = true (default)
+;   - EXECCTRL.STATUS_SEL = 0 (TX FIFO level)
+;   - EXECCTRL.STATUS_N = 1 (threshold = 1)
+;
+; Timing analysis (at 125MHz PIO clock, 5MHz 6502):
+;   - PHI2 high time: ~100ns = 12.5 PIO cycles
+;   - Data read path: 10 cycles = 80ns (20ns margin)
+;   - Status read path: 12 cycles = 96ns (4ns margin, tight but OK)
+;   - Data write path: 8 cycles = 64ns (36ns margin)
+;
+
+.program bus_interface
+
+.wrap_target
+wait_cycle:
+    wait 1 gpio 8               ; [1] Wait for PHI2 to go high
+    jmp pin wait_phi2_low       ; [2] CS_N=1? Not selected, skip this cycle
+
+    ; === Decode operation type ===
+    ; Read GPIO[11:10] = {RW, A0} into x
+    mov osr, pins               ; [3] OSR = all GPIO pin states
+    out null, 10                ; [4] Discard bits 0-9 (D[7:0], PHI2, CS_N)
+    out x, 2                    ; [5] x = {RW, A0}: bit1=RW, bit0=A0
+
+    ; Dispatch based on x:
+    ;   x=0 (RW=0,A0=0): data write (CPU -> MCU)
+    ;   x=1 (RW=0,A0=1): reserved, no-op
+    ;   x=2 (RW=1,A0=0): data read (MCU -> CPU)
+    ;   x=3 (RW=1,A0=1): status read
+    jmp !x do_data_write        ; [6] x=0 -> data write
+    set y, 2                    ; [7]
+    jmp x!=y check_status       ; [8] x!=2 -> check if status read
+
+    ; === x=2: Data read (MCU -> CPU) ===
+do_data_read:
+    pull noblock                ; [9] Get byte from TX FIFO (stale if empty)
+    out pins, 8                 ; [10] Drive data onto D[7:0]
+    set pindirs, 0xFF           ; [11] Enable outputs
+    wait 0 gpio 8               ; [12] Hold until PHI2 falls
+    set pindirs, 0x00           ; [13] Release bus (high-Z)
+    jmp wait_cycle              ; [14]
+
+check_status:
+    set y, 3                    ; [15]
+    jmp x!=y wait_phi2_low      ; [16] x=1 -> reserved, skip
+
+    ; === x=3: Status read ===
+do_status_read:
+    mov osr, ~status            ; [17] 0x00 if TX empty, 0xFF if TX has data
+    out pins, 8                 ; [18] Drive status onto D[7:0]
+    set pindirs, 0xFF           ; [19] Enable outputs
+    wait 0 gpio 8               ; [20] Hold until PHI2 falls
+    set pindirs, 0x00           ; [21] Release bus
+    jmp wait_cycle              ; [22]
+
+    ; === x=0: Data write (CPU -> MCU) ===
+do_data_write:
+    in pins, 8                  ; [23] Sample D[7:0] into ISR
+    push                        ; [24] Send to RX FIFO
+    ; Fall through to wait_phi2_low
+
+wait_phi2_low:
+    wait 0 gpio 8               ; [25] Wait for PHI2 to go low
+.wrap
+
+% c-sdk {
+#include "hardware/clocks.h"
+#include "hardware/gpio.h"
+
+// Pin definitions
+#define BUS_PIN_D0      0
+#define BUS_PIN_D7      7
+#define BUS_PIN_PHI2    8
+#define BUS_PIN_CS_N    9
+#define BUS_PIN_A0      10
+#define BUS_PIN_RW      11
+
+static inline void bus_interface_program_init(PIO pio, uint sm, uint offset) {
+    pio_sm_config c = bus_interface_program_get_default_config(offset);
+
+    // Configure pin mappings
+    sm_config_set_in_pins(&c, BUS_PIN_D0);      // IN starts at D0
+    sm_config_set_out_pins(&c, BUS_PIN_D0, 8);  // OUT to D[7:0]
+    sm_config_set_set_pins(&c, BUS_PIN_D0, 8);  // SET controls D[7:0] pindirs
+    sm_config_set_jmp_pin(&c, BUS_PIN_CS_N);    // JMP PIN uses CS_N
+
+    // Configure shift directions (right shift for both, which is default)
+    sm_config_set_out_shift(&c, true, false, 8);   // Right shift, no autopull, 8 bits
+    sm_config_set_in_shift(&c, true, false, 8);    // Right shift, no autopush, 8 bits
+
+    // Configure status source for TX_AVAIL detection
+    // STATUS = all-1s if TXLEVEL < N, all-0s if TXLEVEL >= N
+    // We want ~status = 0xFF when TX has data, so set N=1
+    sm_config_set_mov_status(&c, STATUS_TX_LESSTHAN, 1);
+
+    // Initialize GPIO pins
+    // Data bus D[7:0]: start as inputs (directly controlled by PIO)
+    for (int i = BUS_PIN_D0; i <= BUS_PIN_D7; i++) {
+        pio_gpio_init(pio, i);
+        gpio_set_pulls(i, false, false);  // No pulls on data bus
+    }
+
+    // Control inputs: directly connect to GPIO (not PIO-controlled)
+    gpio_init(BUS_PIN_PHI2);
+    gpio_set_dir(BUS_PIN_PHI2, GPIO_IN);
+    gpio_set_pulls(BUS_PIN_PHI2, false, false);
+
+    gpio_init(BUS_PIN_CS_N);
+    gpio_set_dir(BUS_PIN_CS_N, GPIO_IN);
+    gpio_set_pulls(BUS_PIN_CS_N, true, false);  // Pull-up on CS_N (deselected by default)
+
+    gpio_init(BUS_PIN_A0);
+    gpio_set_dir(BUS_PIN_A0, GPIO_IN);
+    gpio_set_pulls(BUS_PIN_A0, false, true);    // Pull-down on A0
+
+    gpio_init(BUS_PIN_RW);
+    gpio_set_dir(BUS_PIN_RW, GPIO_IN);
+    gpio_set_pulls(BUS_PIN_RW, true, false);    // Pull-up on RW (read by default)
+
+    // Set initial pin directions for PIO (all inputs)
+    pio_sm_set_consecutive_pindirs(pio, sm, BUS_PIN_D0, 8, false);
+
+    // Run at full system clock for best timing margin
+    sm_config_set_clkdiv(&c, 1.0f);
+
+    // Load configuration and start
+    pio_sm_init(pio, sm, offset, &c);
+}
+
+static inline void bus_interface_enable(PIO pio, uint sm) {
+    pio_sm_set_enabled(pio, sm, true);
+}
+
+static inline void bus_interface_disable(PIO pio, uint sm) {
+    pio_sm_set_enabled(pio, sm, false);
+}
+%}
