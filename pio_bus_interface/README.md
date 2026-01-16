@@ -21,38 +21,29 @@ This PIO-based approach requires:
 
 | GPIO | Signal | Direction | Description |
 |------|--------|-----------|-------------|
-| 0 | CS_N | Input | Chip select (directly checked via JMP PIN or extraction) |
-| 1 | PHI2 | Input | 6502 system clock |
-| 6 | RW | Input | Read/Write (1=read, 0=write) |
+| 0 | RW | Input | Read/Write (1=read, 0=write) |
+| 1 | CS_N | Input | Chip select (active low) |
+| 8 | PHI2 | Input | 6502 system clock |
 | 22-29 | D[7:0] | Bidirectional | 8-bit data bus |
 
-**Notes:**
+**Optimization notes:**
+- RW and CS_N are at GPIO 0-1 for fast 2-bit combined extraction
 - Data bus uses GPIO 22-29 (consecutive pins required for PIO `in pins`/`out pins`)
-- Control pins at GPIO 0, 1, 6 due to Feather RP2350 board constraints
 - A0 is NOT used - status is implicit in the data stream (0xFF = not ready)
 
-### Pin Extraction Overhead
+### Combined CS_N/RW Extraction
 
-Because control pins (GPIO 0, 1, 6) are not adjacent and data pins (GPIO 22-29) are far from GPIO 0, the PIO program must:
-1. Read all 30 GPIO pins at once (`in pins, 30`)
-2. Extract CS_N from bit 0
-3. Extract RW from bit 6
-4. Extract data from bits 22-29
+By placing RW at GPIO 0 and CS_N at GPIO 1, both signals can be extracted and checked with a single 2-bit operation:
 
-This costs **6 extra PIO cycles** compared to an ideal pin arrangement.
+```asm
+out x, 2                ; x = {CS_N, RW} as 2-bit value
+; x=0: CS_N=0, RW=0 -> write, selected
+; x=1: CS_N=0, RW=1 -> read, selected
+; x=2: CS_N=1, RW=0 -> not selected
+; x=3: CS_N=1, RW=1 -> not selected
+```
 
-### Optimal Pin Arrangement (For Reference)
-
-If your board allows, this arrangement minimizes PIO overhead:
-
-| GPIO | Signal | Why |
-|------|--------|-----|
-| 0 | RW | Bit 0 of combined CS_N/RW check |
-| 1 | CS_N | Bit 1 of combined CS_N/RW check |
-| 2+ | PHI2 | Can be anywhere |
-| 22-29 | D[7:0] | Consecutive for PIO |
-
-With RW at GPIO 0 and CS_N at GPIO 1, both can be extracted as a single 2-bit value, saving 4 cycles on writes and 3 cycles on reads.
+This saves 4 cycles compared to extracting each signal separately.
 
 ## Protocol
 
@@ -144,28 +135,21 @@ At 150MHz PIO clock (RP2350 default):
 
 | Operation | PIO Cycles | Time | Notes |
 |-----------|-----------|------|-------|
-| Write (current) | 16 | 107ns | Includes pin extraction overhead |
-| Read to data valid (current) | 15 | 100ns | Includes pin extraction overhead |
-| Write (optimal pins) | 12 | 80ns | With RW@GPIO0, CS_N@GPIO1 |
-| Read to data valid (optimal) | 12 | 80ns | With RW@GPIO0, CS_N@GPIO1 |
-
-**Pin extraction overhead:** ~6 cycles (40ns) due to non-adjacent control pins.
+| Write | 12 | 80ns | From PHI2 high to FIFO push |
+| Read to data valid | 12 | 80ns | From PHI2 high to data on bus |
+| Not selected | 8 | 53ns | Skip to wait for PHI2 low |
 
 ### 6502 Compatibility
 
-| 6502 Clock | PHI2 High | Write Margin (current) | Read Margin (current) |
-|------------|-----------|------------------------|----------------------|
-| 1 MHz | 500ns | 393ns | 400ns |
-| 2 MHz | 250ns | 143ns | 150ns |
-| 4 MHz | 125ns | 18ns | 25ns |
-| 5 MHz | 100ns | -7ns ❌ | 0ns ⚠️ |
-
-With optimal pin arrangement (40ns savings):
-| 6502 Clock | PHI2 High | Write Margin (optimal) | Read Margin (optimal) |
-|------------|-----------|------------------------|----------------------|
-| 4 MHz | 125ns | 45ns | 45ns |
-| 5 MHz | 100ns | 20ns | 20ns |
+| 6502 Clock | PHI2 High | Write Margin | Read Margin |
+|------------|-----------|--------------|-------------|
+| 1 MHz | 500ns | 420ns ✓ | 420ns ✓ |
+| 2 MHz | 250ns | 170ns ✓ | 170ns ✓ |
+| 4 MHz | 125ns | 45ns ✓ | 45ns ✓ |
+| 5 MHz | 100ns | 20ns ✓ | 20ns ✓ |
 | 8 MHz | 62.5ns | -17.5ns ❌ | -17.5ns ❌ |
+
+**Practical maximum: ~5-6 MHz** with comfortable margins.
 
 ## How It Works
 
@@ -181,32 +165,35 @@ do_read:
     mov osr, ~null      ; Reset OSR to 0xFFFFFFFF for next empty read
 ```
 
-### Pin Extraction (Current Implementation)
-
-Because data is at GPIO 22-29 and control at GPIO 0, 1, 6:
+### PIO Program Flow
 
 ```asm
-    in pins, 30         ; Read GPIO 0-29 into ISR
-    mov y, isr          ; Save for later
-    in null, 32         ; Clear ISR
-
-    ; Extract CS_N (bit 0)
-    mov osr, y
-    out x, 1            ; x = CS_N
-    jmp x-- skip        ; Skip if not selected
-
-    ; Extract RW (bit 6)
-    mov osr, y
-    out null, 6         ; Discard bits 0-5
-    out x, 1            ; x = RW
-    jmp x-- do_read     ; RW=1 -> read
+wait_cycle:
+    wait 1 gpio PHI2        ; 1 - Wait for PHI2 high
+    in pins, 30             ; 2 - Read all GPIO pins
+    mov y, isr              ; 3 - Save for later
+    in null, 32             ; 4 - Clear ISR
+    mov osr, y              ; 5
+    out x, 2                ; 6 - x = {CS_N, RW}
+    jmp x-- not_write       ; 7 - x=0 -> write
 
 do_write:
-    ; Extract data (bits 22-29)
-    mov osr, y
-    out null, 22        ; Discard bits 0-21
-    out isr, 8          ; Get data bits
-    push
+    mov osr, y              ; 8
+    out null, 22            ; 9  - Discard bits 0-21
+    out isr, 8              ; 10 - Get D[7:0]
+    push                    ; 11
+    jmp wait_phi2_low       ; 12
+
+not_write:
+    jmp x-- wait_phi2_low   ; 8 - x>=2 -> not selected
+
+do_read:
+    pull noblock            ; 9
+    out pins, 8             ; 10
+    mov osr, ~null          ; 11
+    out pindirs, 8          ; 12 - Enable outputs
+    wait 0 gpio PHI2        ; Wait for PHI2 low
+    ; ... disable outputs, reset sentinel ...
 ```
 
 ## Architecture
@@ -227,9 +214,9 @@ do_write:
     ┌──────┴──────┐
     │  6502 Bus   │
     │  D[7:0]     │ ← GPIO 22-29
-    │  PHI2       │ ← GPIO 1
-    │  CS_N       │ ← GPIO 0
-    │  RW         │ ← GPIO 6
+    │  PHI2       │ ← GPIO 8
+    │  RW         │ ← GPIO 0
+    │  CS_N       │ ← GPIO 1
     └─────────────┘
 ```
 
@@ -242,22 +229,21 @@ The `pio_bus_interface_rx_only` firmware is for safe initial testing:
 
 ## Comparison to Original Design
 
-| Aspect | CPLD + Latches | PIO (current) | PIO (optimal pins) |
-|--------|----------------|---------------|-------------------|
-| External chips | 4 | 1 (addr decode) | 1 (addr decode) |
-| GPIO pins | 13 | 11 | 11 |
-| Write cycles | — | 16 | **12** |
-| Read cycles | — | 15 | **12** |
-| Max 6502 clock | — | ~4 MHz | **~5 MHz** |
-| Status mechanism | Hardware | Implicit (0xFF) | Implicit (0xFF) |
-| Max response size | Unlimited | 254 bytes | 254 bytes |
+| Aspect | CPLD + Latches | PIO |
+|--------|----------------|-----|
+| External chips | 4 | 1 (addr decode only) |
+| GPIO pins | 13 | 11 |
+| Write cycles | — | **12** |
+| Read cycles | — | **12** |
+| Max 6502 clock | — | **~5-6 MHz** |
+| Status mechanism | Hardware | Implicit (0xFF sentinel) |
+| Max response size | Unlimited | 254 bytes |
 
 ## Limitations
 
 - Maximum response length is 254 bytes (0xFF reserved for "not ready")
 - 128 device addresses (bit 7 used for read/write flag)
 - Single PIO state machine (one bus interface per PIO block)
-- Current pin arrangement limits 6502 clock to ~4 MHz (vs ~5 MHz with optimal pins)
 
 ## Files
 

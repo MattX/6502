@@ -69,9 +69,9 @@ int main(void) {
     printf("  (Simplified Protocol, No A0)\n");
     printf("========================================\n");
     printf("Pin mapping:\n");
-    printf("  GPIO 0:     CS_N\n");
-    printf("  GPIO 1:     PHI2\n");
-    printf("  GPIO 6:     RW\n");
+    printf("  GPIO 0:     RW\n");
+    printf("  GPIO 1:     CS_N\n");
+    printf("  GPIO 8:     PHI2\n");
     printf("  GPIO 22-29: D[7:0] data bus\n");
     printf("\n");
     printf("Protocol:\n");
