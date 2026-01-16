@@ -49,3 +49,31 @@ pico_add_extra_outputs(pio_bus_interface)
 # Enable UART stdio, disable USB stdio (to avoid conflicts)
 pico_enable_stdio_uart(pio_bus_interface 0)  # Disabled - we set up UART manually
 pico_enable_stdio_usb(pio_bus_interface 1)   # Enable USB for debugging
+
+# ============================================================================
+# RX-Only Safe Test Version
+# MCU never drives the bus - just logs all CPU writes to UART
+# ============================================================================
+
+add_executable(pio_bus_interface_rx_only
+    main_rx_only.c
+)
+
+pico_generate_pio_header(pio_bus_interface_rx_only
+    ${CMAKE_CURRENT_LIST_DIR}/bus_interface_rx_only.pio)
+
+target_include_directories(pio_bus_interface_rx_only PUBLIC
+    ${CMAKE_CURRENT_LIST_DIR}
+)
+
+target_link_libraries(pio_bus_interface_rx_only PUBLIC
+    pico_stdlib
+    hardware_pio
+    hardware_gpio
+    hardware_uart
+)
+
+pico_add_extra_outputs(pio_bus_interface_rx_only)
+
+pico_enable_stdio_uart(pio_bus_interface_rx_only 0)
+pico_enable_stdio_usb(pio_bus_interface_rx_only 1)
