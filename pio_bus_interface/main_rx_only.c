@@ -1,6 +1,8 @@
 /*
  * PIO Bus Interface - Receive Only Test
  *
+ * Target: RP2350
+ *
  * SAFE TEST MODE: MCU never drives the data bus.
  * All bytes written by the CPU are logged to USB serial as hex and ASCII.
  *
@@ -14,19 +16,12 @@
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
 #include "hardware/gpio.h"
-#include "hardware/irq.h"
 
 #include "bus_interface_rx_only.pio.h"
 
 // PIO
 static PIO pio = pio0;
 static uint sm = 0;
-
-// Receive buffer (filled by IRQ handler)
-#define RX_BUFFER_SIZE 256
-static volatile uint8_t rx_buffer[RX_BUFFER_SIZE];
-static volatile uint rx_head = 0;
-static volatile uint rx_tail = 0;
 
 // Statistics
 static uint32_t total_bytes = 0;
@@ -37,25 +32,6 @@ static uint32_t last_report_time = 0;
 static uint8_t line_buffer[LINE_WIDTH];
 static uint line_pos = 0;
 static uint32_t line_addr = 0;
-
-// PIO IRQ handler - called when PIO signals a write cycle
-static void pio_irq_handler(void) {
-    // Check if IRQ 0 is set (write cycle detected)
-    if (pio_interrupt_get(pio, 0)) {
-        // Read data pins immediately
-        uint8_t data = bus_read_data_pins();
-
-        // Store in ring buffer
-        uint next_head = (rx_head + 1) % RX_BUFFER_SIZE;
-        if (next_head != rx_tail) {
-            rx_buffer[rx_head] = data;
-            rx_head = next_head;
-        }
-
-        // Clear the IRQ
-        pio_interrupt_clear(pio, 0);
-    }
-}
 
 static void print_line(void) {
     if (line_pos == 0) return;
@@ -102,6 +78,7 @@ int main(void) {
     printf("\n");
     printf("================================================\n");
     printf("  PIO Bus Interface - RECEIVE ONLY (Safe Test)\n");
+    printf("  Target: RP2350\n");
     printf("================================================\n");
     printf("\n");
     printf("** MCU NEVER DRIVES THE BUS - SAFE FOR TESTING **\n");
@@ -110,9 +87,7 @@ int main(void) {
     printf("  GPIO 0:     CS_N\n");
     printf("  GPIO 1:     PHI2\n");
     printf("  GPIO 6:     RW\n");
-    printf("  GPIO 26-29: D0-D3\n");
-    printf("  GPIO 24-25: D4-D5\n");
-    printf("  GPIO 18-19: D6-D7\n");
+    printf("  GPIO 22-29: D[7:0] data bus\n");
     printf("\n");
     printf("All CPU writes will be logged below:\n");
     printf("------------------------------------------------\n");
@@ -120,11 +95,6 @@ int main(void) {
     // Load PIO program
     uint offset = pio_add_program(pio, &bus_interface_rx_only_program);
     bus_interface_rx_only_program_init(pio, sm, offset);
-
-    // Set up IRQ handler
-    pio_set_irq0_source_enabled(pio, pis_interrupt0, true);
-    irq_set_exclusive_handler(PIO0_IRQ_0, pio_irq_handler);
-    irq_set_enabled(PIO0_IRQ_0, true);
 
     // Start PIO
     bus_interface_rx_only_enable(pio, sm);
@@ -134,17 +104,17 @@ int main(void) {
     last_report_time = to_ms_since_boot(get_absolute_time());
 
     while (1) {
-        // Process data from ring buffer (filled by IRQ handler)
-        while (rx_tail != rx_head) {
-            uint8_t data = rx_buffer[rx_tail];
-            rx_tail = (rx_tail + 1) % RX_BUFFER_SIZE;
-            log_byte(data);
+        // Check for data in RX FIFO
+        while (!pio_sm_is_rx_fifo_empty(pio, sm)) {
+            uint32_t data = pio_sm_get(pio, sm);
+            log_byte(data & 0xFF);
         }
 
         // Flush partial line after timeout
         uint32_t now = to_ms_since_boot(get_absolute_time());
         if (line_pos > 0 && (now - last_report_time) > 500) {
             print_line();
+            last_report_time = now;
         }
 
         // Periodic stats

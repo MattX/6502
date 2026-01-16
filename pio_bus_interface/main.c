@@ -72,9 +72,7 @@ int main(void) {
     printf("  GPIO 0:     CS_N\n");
     printf("  GPIO 1:     PHI2\n");
     printf("  GPIO 6:     RW\n");
-    printf("  GPIO 26-29: D0-D3\n");
-    printf("  GPIO 24-25: D4-D5\n");
-    printf("  GPIO 18-19: D6-D7\n");
+    printf("  GPIO 22-29: D[7:0] data bus\n");
     printf("\n");
     printf("Protocol:\n");
     printf("  Write: [device] [length] [data...]\n");

@@ -3,6 +3,10 @@ cmake_minimum_required(VERSION 3.13)
 # Set path to Pico SDK (submodule at repository root)
 set(PICO_SDK_PATH ${CMAKE_CURRENT_LIST_DIR}/../pico-sdk)
 
+# Target RP2350 (Pico 2)
+set(PICO_BOARD pico2)
+set(PICO_PLATFORM rp2350)
+
 # Pull in SDK (must be before project)
 include(pico_sdk_import.cmake)
 
@@ -40,7 +44,6 @@ target_link_libraries(pio_bus_interface PUBLIC
     hardware_pio
     hardware_dma
     hardware_gpio
-    hardware_uart
 )
 
 # Create map/bin/hex/uf2 files
@@ -70,7 +73,6 @@ target_link_libraries(pio_bus_interface_rx_only PUBLIC
     pico_stdlib
     hardware_pio
     hardware_gpio
-    hardware_irq
 )
 
 pico_add_extra_outputs(pio_bus_interface_rx_only)
