@@ -1,6 +1,6 @@
 # PIO-Based 6502 Bus Interface
 
-This project implements a byte-stream interface between a 6502 CPU and an RP2040 microcontroller using only PIO and DMA, eliminating the need for external CPLD and latches.
+This project implements a byte-stream interface between a 6502 CPU and an RP2350 microcontroller using PIO and DMA, eliminating the need for external CPLD and latches.
 
 ## Overview
 
@@ -12,18 +12,47 @@ This PIO-based approach requires:
 - **No external logic ICs** - just direct GPIO connections
 - External address decode logic (e.g., 74HC138) to generate CS_N
 
+## Target Hardware
+
+- **MCU:** RP2350 (Raspberry Pi Pico 2)
+- **Tested on:** Adafruit Feather RP2350
+
 ## Pin Mapping
 
 | GPIO | Signal | Direction | Description |
 |------|--------|-----------|-------------|
-| 0-7 | D[7:0] | Bidirectional | 8-bit data bus |
-| 8 | PHI2 | Input | 6502 system clock |
-| 9 | CS_N | Input | Chip select |
-| 10 | RW | Input | Read/Write (1=read, 0=write) |
-| 16 | UART TX | Output | Debug console |
-| 17 | UART RX | Input | Debug console |
+| 0 | CS_N | Input | Chip select (directly checked via JMP PIN or extraction) |
+| 1 | PHI2 | Input | 6502 system clock |
+| 6 | RW | Input | Read/Write (1=read, 0=write) |
+| 22-29 | D[7:0] | Bidirectional | 8-bit data bus |
 
-**Note:** A0 is NOT used. Status is implicit in the data stream (0xFF = not ready).
+**Notes:**
+- Data bus uses GPIO 22-29 (consecutive pins required for PIO `in pins`/`out pins`)
+- Control pins at GPIO 0, 1, 6 due to Feather RP2350 board constraints
+- A0 is NOT used - status is implicit in the data stream (0xFF = not ready)
+
+### Pin Extraction Overhead
+
+Because control pins (GPIO 0, 1, 6) are not adjacent and data pins (GPIO 22-29) are far from GPIO 0, the PIO program must:
+1. Read all 30 GPIO pins at once (`in pins, 30`)
+2. Extract CS_N from bit 0
+3. Extract RW from bit 6
+4. Extract data from bits 22-29
+
+This costs **6 extra PIO cycles** compared to an ideal pin arrangement.
+
+### Optimal Pin Arrangement (For Reference)
+
+If your board allows, this arrangement minimizes PIO overhead:
+
+| GPIO | Signal | Why |
+|------|--------|-----|
+| 0 | RW | Bit 0 of combined CS_N/RW check |
+| 1 | CS_N | Bit 1 of combined CS_N/RW check |
+| 2+ | PHI2 | Can be anywhere |
+| 22-29 | D[7:0] | Consecutive for PIO |
+
+With RW at GPIO 0 and CS_N at GPIO 1, both can be extracted as a single 2-bit value, saving 4 cycles on writes and 3 cycles on reads.
 
 ## Protocol
 
@@ -94,12 +123,6 @@ read_example:
     RTS
 ```
 
-## Loopback Test
-
-The included firmware implements a loopback test:
-- Data written to device N is stored in that device's buffer
-- When reading from device N, the stored data is returned
-
 ## Building
 
 ```bash
@@ -109,24 +132,40 @@ cmake ..
 make
 ```
 
-Flash `pio_bus_interface.uf2` to a Pico by holding BOOTSEL while connecting USB.
+This produces two firmware images:
+- `pio_bus_interface.uf2` - Full bidirectional loopback test
+- `pio_bus_interface_rx_only.uf2` - Receive-only safe test (never drives bus)
+
+Flash by holding BOOTSEL while connecting USB, then copy the .uf2 file.
 
 ## Timing Analysis
 
-At 125MHz PIO clock:
+At 150MHz PIO clock (RP2350 default):
 
 | Operation | PIO Cycles | Time | Notes |
 |-----------|-----------|------|-------|
-| Read | 10 | 80ns | Includes output enable |
-| Write | 8 | 64ns | Fastest path |
+| Write (current) | 16 | 107ns | Includes pin extraction overhead |
+| Read to data valid (current) | 15 | 100ns | Includes pin extraction overhead |
+| Write (optimal pins) | 12 | 80ns | With RW@GPIO0, CS_N@GPIO1 |
+| Read to data valid (optimal) | 12 | 80ns | With RW@GPIO0, CS_N@GPIO1 |
 
-**Works reliably at 5MHz 6502** (100ns PHI2 high, 20ns margin for reads).
+**Pin extraction overhead:** ~6 cycles (40ns) due to non-adjacent control pins.
 
-| 6502 Clock | PHI2 High | Read Margin |
-|------------|-----------|-------------|
-| 5MHz | 100ns | 20ns |
-| 4MHz | 125ns | 45ns |
-| 8MHz | 62.5ns | -17.5ns (too fast) |
+### 6502 Compatibility
+
+| 6502 Clock | PHI2 High | Write Margin (current) | Read Margin (current) |
+|------------|-----------|------------------------|----------------------|
+| 1 MHz | 500ns | 393ns | 400ns |
+| 2 MHz | 250ns | 143ns | 150ns |
+| 4 MHz | 125ns | 18ns | 25ns |
+| 5 MHz | 100ns | -7ns ❌ | 0ns ⚠️ |
+
+With optimal pin arrangement (40ns savings):
+| 6502 Clock | PHI2 High | Write Margin (optimal) | Read Margin (optimal) |
+|------------|-----------|------------------------|----------------------|
+| 4 MHz | 125ns | 45ns | 45ns |
+| 5 MHz | 100ns | 20ns | 20ns |
+| 8 MHz | 62.5ns | -17.5ns ❌ | -17.5ns ❌ |
 
 ## How It Works
 
@@ -142,54 +181,88 @@ do_read:
     mov osr, ~null      ; Reset OSR to 0xFFFFFFFF for next empty read
 ```
 
-### No Status Register Needed
+### Pin Extraction (Current Implementation)
 
-The protocol embeds status in the data stream:
-- **Write path**: CPU writes freely (DMA drains FIFO faster than 6502 can fill it)
-- **Read path**: CPU polls by reading; 0xFF means "not ready", anything else is the response length
+Because data is at GPIO 22-29 and control at GPIO 0, 1, 6:
 
-This eliminates:
-- The A0 address bit
-- The status register PIO path
-- The `mov osr, ~status` mechanism
+```asm
+    in pins, 30         ; Read GPIO 0-29 into ISR
+    mov y, isr          ; Save for later
+    in null, 32         ; Clear ISR
+
+    ; Extract CS_N (bit 0)
+    mov osr, y
+    out x, 1            ; x = CS_N
+    jmp x-- skip        ; Skip if not selected
+
+    ; Extract RW (bit 6)
+    mov osr, y
+    out null, 6         ; Discard bits 0-5
+    out x, 1            ; x = RW
+    jmp x-- do_read     ; RW=1 -> read
+
+do_write:
+    ; Extract data (bits 22-29)
+    mov osr, y
+    out null, 22        ; Discard bits 0-21
+    out isr, 8          ; Get data bits
+    push
+```
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                         RP2040                               │
-│                                                              │
-│   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    │
-│   │  PIO SM0    │◄──►│  DMA RX     │───►│  Device     │    │
-│   │  (18 instr) │    │  Channel    │    │  Buffers    │    │
-│   │             │    ├─────────────┤    │  [0..127]   │    │
-│   │  Read/Write │◄──►│  DMA TX     │◄───│             │    │
-│   │  only       │    │  Channel    │    │             │    │
-│   └──────┬──────┘    └─────────────┘    └─────────────┘    │
-│          │                                                   │
-└──────────┼───────────────────────────────────────────────────┘
+│                         RP2350                              │
+│                                                             │
+│   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐   │
+│   │  PIO SM0    │◄──►│  DMA RX     │───►│  Device     │   │
+│   │             │    │  Channel    │    │  Buffers    │   │
+│   │  Read/Write │    ├─────────────┤    │  [0..127]   │   │
+│   │             │◄──►│  DMA TX     │◄───│             │   │
+│   └──────┬──────┘    └─────────────┘    └─────────────┘   │
+│          │                                                  │
+└──────────┼──────────────────────────────────────────────────┘
            │
     ┌──────┴──────┐
     │  6502 Bus   │
-    │  D[7:0]     │
-    │  PHI2, CS_N │
-    │  RW         │
+    │  D[7:0]     │ ← GPIO 22-29
+    │  PHI2       │ ← GPIO 1
+    │  CS_N       │ ← GPIO 0
+    │  RW         │ ← GPIO 6
     └─────────────┘
 ```
 
+## Receive-Only Safe Test Mode
+
+The `pio_bus_interface_rx_only` firmware is for safe initial testing:
+- **Never drives the data bus** - only monitors CPU writes
+- Logs all received bytes to USB serial as hex dump
+- Use this first to verify wiring and timing without risk of bus contention
+
 ## Comparison to Original Design
 
-| Aspect | CPLD + Latches | PIO (with A0) | PIO (simplified) |
-|--------|----------------|---------------|------------------|
+| Aspect | CPLD + Latches | PIO (current) | PIO (optimal pins) |
+|--------|----------------|---------------|-------------------|
 | External chips | 4 | 1 (addr decode) | 1 (addr decode) |
-| GPIO pins | 13 | 12 | **11** |
-| PIO instructions | — | 29 | **18** |
-| Read path (cycles) | — | 12 | **10** |
-| Status mechanism | Hardware | `~status` | **Implicit (0xFF)** |
-| Max response size | Unlimited | Unlimited | **254 bytes** |
+| GPIO pins | 13 | 11 | 11 |
+| Write cycles | — | 16 | **12** |
+| Read cycles | — | 15 | **12** |
+| Max 6502 clock | — | ~4 MHz | **~5 MHz** |
+| Status mechanism | Hardware | Implicit (0xFF) | Implicit (0xFF) |
+| Max response size | Unlimited | 254 bytes | 254 bytes |
 
 ## Limitations
 
 - Maximum response length is 254 bytes (0xFF reserved for "not ready")
 - 128 device addresses (bit 7 used for read/write flag)
 - Single PIO state machine (one bus interface per PIO block)
+- Current pin arrangement limits 6502 clock to ~4 MHz (vs ~5 MHz with optimal pins)
+
+## Files
+
+- `bus_interface.pio` - Full bidirectional PIO program
+- `bus_interface_rx_only.pio` - Receive-only PIO program (safe test)
+- `bus_interface.c/h` - C driver with device buffers
+- `main.c` - Loopback test firmware
+- `main_rx_only.c` - Receive-only test firmware
