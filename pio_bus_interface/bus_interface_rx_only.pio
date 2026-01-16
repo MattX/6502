@@ -4,11 +4,17 @@
 ; This is a minimal receive-only version for safe testing.
 ; The MCU NEVER drives the data bus - only monitors writes from the CPU.
 ;
-; Pin mapping:
-;   GPIO 0-7:   D[7:0] - INPUT ONLY (directly controlled by PIO)
-;   GPIO 8:     PHI2   - 6502 system clock
-;   GPIO 9:     CS_N   - chip select (directly controls JMP PIN)
-;   GPIO 10:    RW     - read/write (directly controls JMP PIN - we only care about writes)
+; Pin mapping (directly controls jmp pin/wait gpio):
+;   GPIO 0:     CS_N   - chip select (directly controls JMP PIN)
+;   GPIO 1:     PHI2   - 6502 system clock
+;   GPIO 6:     RW     - read/write (1=read, 0=write)
+;
+; Data bus pins (non-consecutive, directly via GPIO):
+;   D0=GPIO26, D1=GPIO27, D2=GPIO28, D3=GPIO29
+;   D4=GPIO24, D5=GPIO25, D6=GPIO18, D7=GPIO19
+;
+; Note: Because data pins are non-consecutive, we signal the C code via IRQ
+; when a write occurs, and it reads the GPIO state directly.
 ;
 ; This version ignores RW=1 (reads) entirely. When the CPU reads, it will
 ; see whatever is on the bus (likely floating/pulled values), but that's
@@ -17,55 +23,84 @@
 
 .program bus_interface_rx_only
 
+.define PUBLIC PIN_PHI2  1
+.define PUBLIC PIN_CS_N  0
+.define PUBLIC PIN_RW    6
+
 .wrap_target
 wait_cycle:
-    wait 1 gpio 8               ; Wait for PHI2 to go high
+    wait 1 gpio PIN_PHI2        ; Wait for PHI2 to go high
     jmp pin wait_phi2_low       ; CS_N=1? Not selected, skip
 
-    ; Check RW - we only care about writes (RW=0)
-    mov osr, pins               ; OSR = all GPIO pin states
-    out null, 10                ; Discard bits 0-9
-    out x, 1                    ; x = RW (bit 10)
+    ; Check RW (GPIO 6) - we only care about writes (RW=0)
+    in pins, 7                  ; Read GPIO 0-6 into ISR
+    mov x, isr
+    in null, 32                 ; Clear ISR for next use
+
+    ; Extract bit 6 (RW) - shift right by 6, mask with 1
+    mov osr, x
+    out null, 6                 ; Discard bits 0-5
+    out x, 1                    ; x = bit 6 = RW
     jmp !x do_capture           ; RW=0 (write)? Capture it
     jmp wait_phi2_low           ; RW=1 (read)? Ignore
 
 do_capture:
-    in pins, 8                  ; Sample D[7:0] into ISR
-    push                        ; Send to RX FIFO
+    irq set 0                   ; Signal C code to read GPIO pins now
+    ; Note: C code reads bus_read_data_pins() and pushes to its buffer
 
 wait_phi2_low:
-    wait 0 gpio 8               ; Wait for PHI2 to go low
+    wait 0 gpio PIN_PHI2        ; Wait for PHI2 to go low
 .wrap
 
 % c-sdk {
 #include "hardware/gpio.h"
 
-// Pin definitions
-#define BUS_PIN_D0      0
-#define BUS_PIN_D7      7
-#define BUS_PIN_PHI2    8
-#define BUS_PIN_CS_N    9
-#define BUS_PIN_RW      10
+// Control pin definitions
+#define BUS_PIN_CS_N    0
+#define BUS_PIN_PHI2    1
+#define BUS_PIN_RW      6
+
+// Data bus pin definitions (non-consecutive, directly accessed via GPIO)
+#define BUS_PIN_D0      26
+#define BUS_PIN_D1      27
+#define BUS_PIN_D2      28
+#define BUS_PIN_D3      29
+#define BUS_PIN_D4      24
+#define BUS_PIN_D5      25
+#define BUS_PIN_D6      18
+#define BUS_PIN_D7      19
+
+static const uint8_t bus_data_pins[8] = {
+    BUS_PIN_D0, BUS_PIN_D1, BUS_PIN_D2, BUS_PIN_D3,
+    BUS_PIN_D4, BUS_PIN_D5, BUS_PIN_D6, BUS_PIN_D7
+};
+
+// Read data byte from GPIO pins
+static inline uint8_t bus_read_data_pins(void) {
+    uint32_t all_pins = gpio_get_all();
+    uint8_t data = 0;
+    data |= ((all_pins >> BUS_PIN_D0) & 1) << 0;
+    data |= ((all_pins >> BUS_PIN_D1) & 1) << 1;
+    data |= ((all_pins >> BUS_PIN_D2) & 1) << 2;
+    data |= ((all_pins >> BUS_PIN_D3) & 1) << 3;
+    data |= ((all_pins >> BUS_PIN_D4) & 1) << 4;
+    data |= ((all_pins >> BUS_PIN_D5) & 1) << 5;
+    data |= ((all_pins >> BUS_PIN_D6) & 1) << 6;
+    data |= ((all_pins >> BUS_PIN_D7) & 1) << 7;
+    return data;
+}
 
 static inline void bus_interface_rx_only_program_init(PIO pio, uint sm, uint offset) {
     pio_sm_config c = bus_interface_rx_only_program_get_default_config(offset);
 
-    // Configure pin mappings - INPUT ONLY, never output
-    sm_config_set_in_pins(&c, BUS_PIN_D0);      // IN starts at D0
-    sm_config_set_jmp_pin(&c, BUS_PIN_CS_N);    // JMP PIN uses CS_N
+    // JMP PIN uses CS_N
+    sm_config_set_jmp_pin(&c, BUS_PIN_CS_N);
 
-    // Configure shift (right shift, no autopush)
-    sm_config_set_in_shift(&c, true, false, 8);
+    // IN pins start at GPIO 0 for reading control signals
+    sm_config_set_in_pins(&c, 0);
+    sm_config_set_in_shift(&c, true, false, 32);
 
-    // Initialize data bus pins as INPUTS with no pulls
-    // IMPORTANT: We never configure these as outputs!
-    for (int i = BUS_PIN_D0; i <= BUS_PIN_D7; i++) {
-        gpio_init(i);
-        gpio_set_dir(i, GPIO_IN);
-        gpio_set_pulls(i, false, false);  // No pulls - directly connected to 6502 bus
-    }
-
-    // Control inputs
+    // Initialize control pins
     gpio_init(BUS_PIN_PHI2);
     gpio_set_dir(BUS_PIN_PHI2, GPIO_IN);
     gpio_set_pulls(BUS_PIN_PHI2, false, false);
@@ -77,6 +112,14 @@ static inline void bus_interface_rx_only_program_init(PIO pio, uint sm, uint off
     gpio_init(BUS_PIN_RW);
     gpio_set_dir(BUS_PIN_RW, GPIO_IN);
     gpio_set_pulls(BUS_PIN_RW, true, false);    // Pull-up (read by default)
+
+    // Initialize data bus pins as INPUTS with no pulls
+    // IMPORTANT: We never configure these as outputs!
+    for (int i = 0; i < 8; i++) {
+        gpio_init(bus_data_pins[i]);
+        gpio_set_dir(bus_data_pins[i], GPIO_IN);
+        gpio_set_pulls(bus_data_pins[i], false, false);
+    }
 
     // Run at full system clock
     sm_config_set_clkdiv(&c, 1.0f);

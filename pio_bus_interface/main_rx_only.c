@@ -2,7 +2,7 @@
  * PIO Bus Interface - Receive Only Test
  *
  * SAFE TEST MODE: MCU never drives the data bus.
- * All bytes written by the CPU are logged to UART as hex and ASCII.
+ * All bytes written by the CPU are logged to USB serial as hex and ASCII.
  *
  * Use this to verify basic PIO timing and bus capture without
  * risking electrical damage from bus contention.
@@ -13,26 +13,20 @@
 
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
-#include "hardware/uart.h"
 #include "hardware/gpio.h"
+#include "hardware/irq.h"
 
 #include "bus_interface_rx_only.pio.h"
-
-// UART Console
-#define UART_ID         uart0
-#define UART_BAUD_RATE  115200
-#define UART_TX_PIN     16
-#define UART_RX_PIN     17
-
-// Status LED
-#ifndef PICO_DEFAULT_LED_PIN
-#define PICO_DEFAULT_LED_PIN 25
-#endif
-#define LED_PIN         PICO_DEFAULT_LED_PIN
 
 // PIO
 static PIO pio = pio0;
 static uint sm = 0;
+
+// Receive buffer (filled by IRQ handler)
+#define RX_BUFFER_SIZE 256
+static volatile uint8_t rx_buffer[RX_BUFFER_SIZE];
+static volatile uint rx_head = 0;
+static volatile uint rx_tail = 0;
 
 // Statistics
 static uint32_t total_bytes = 0;
@@ -43,6 +37,25 @@ static uint32_t last_report_time = 0;
 static uint8_t line_buffer[LINE_WIDTH];
 static uint line_pos = 0;
 static uint32_t line_addr = 0;
+
+// PIO IRQ handler - called when PIO signals a write cycle
+static void pio_irq_handler(void) {
+    // Check if IRQ 0 is set (write cycle detected)
+    if (pio_interrupt_get(pio, 0)) {
+        // Read data pins immediately
+        uint8_t data = bus_read_data_pins();
+
+        // Store in ring buffer
+        uint next_head = (rx_head + 1) % RX_BUFFER_SIZE;
+        if (next_head != rx_tail) {
+            rx_buffer[rx_head] = data;
+            rx_head = next_head;
+        }
+
+        // Clear the IRQ
+        pio_interrupt_clear(pio, 0);
+    }
+}
 
 static void print_line(void) {
     if (line_pos == 0) return;
@@ -81,40 +94,10 @@ static void log_byte(uint8_t byte) {
     }
 }
 
-static void led_task(void) {
-    static uint32_t last_toggle = 0;
-    static bool activity = false;
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-
-    // Fast blink when receiving data
-    if (total_bytes > 0) {
-        activity = true;
-        if (now - last_toggle >= 50) {
-            gpio_xor_mask(1u << LED_PIN);
-            last_toggle = now;
-        }
-    } else {
-        // Slow blink when idle
-        if (now - last_toggle >= 500) {
-            gpio_xor_mask(1u << LED_PIN);
-            last_toggle = now;
-        }
-    }
-}
-
 int main(void) {
     stdio_init_all();
 
-    // UART console
-    uart_init(UART_ID, UART_BAUD_RATE);
-    gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
-    gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
-
-    // LED
-    gpio_init(LED_PIN);
-    gpio_set_dir(LED_PIN, GPIO_OUT);
-
-    sleep_ms(1000);
+    sleep_ms(2000);  // Wait for USB enumeration
 
     printf("\n");
     printf("================================================\n");
@@ -124,18 +107,26 @@ int main(void) {
     printf("** MCU NEVER DRIVES THE BUS - SAFE FOR TESTING **\n");
     printf("\n");
     printf("Pin mapping:\n");
-    printf("  GPIO 0-7:  D[7:0] (INPUT ONLY)\n");
-    printf("  GPIO 8:    PHI2\n");
-    printf("  GPIO 9:    CS_N\n");
-    printf("  GPIO 10:   RW\n");
-    printf("  GPIO 16/17: UART (%d baud)\n", UART_BAUD_RATE);
+    printf("  GPIO 0:     CS_N\n");
+    printf("  GPIO 1:     PHI2\n");
+    printf("  GPIO 6:     RW\n");
+    printf("  GPIO 26-29: D0-D3\n");
+    printf("  GPIO 24-25: D4-D5\n");
+    printf("  GPIO 18-19: D6-D7\n");
     printf("\n");
     printf("All CPU writes will be logged below:\n");
     printf("------------------------------------------------\n");
 
-    // Load and start PIO
+    // Load PIO program
     uint offset = pio_add_program(pio, &bus_interface_rx_only_program);
     bus_interface_rx_only_program_init(pio, sm, offset);
+
+    // Set up IRQ handler
+    pio_set_irq0_source_enabled(pio, pis_interrupt0, true);
+    irq_set_exclusive_handler(PIO0_IRQ_0, pio_irq_handler);
+    irq_set_enabled(PIO0_IRQ_0, true);
+
+    // Start PIO
     bus_interface_rx_only_enable(pio, sm);
 
     printf("PIO running. Waiting for data...\n\n");
@@ -143,10 +134,11 @@ int main(void) {
     last_report_time = to_ms_since_boot(get_absolute_time());
 
     while (1) {
-        // Check for data from PIO
-        while (!pio_sm_is_rx_fifo_empty(pio, sm)) {
-            uint32_t data = pio_sm_get(pio, sm);
-            log_byte(data & 0xFF);
+        // Process data from ring buffer (filled by IRQ handler)
+        while (rx_tail != rx_head) {
+            uint8_t data = rx_buffer[rx_tail];
+            rx_tail = (rx_tail + 1) % RX_BUFFER_SIZE;
+            log_byte(data);
         }
 
         // Flush partial line after timeout
@@ -162,8 +154,6 @@ int main(void) {
             }
             last_report_time = now;
         }
-
-        led_task();
     }
 
     return 0;

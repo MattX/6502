@@ -46,13 +46,13 @@ target_link_libraries(pio_bus_interface PUBLIC
 # Create map/bin/hex/uf2 files
 pico_add_extra_outputs(pio_bus_interface)
 
-# Enable UART stdio, disable USB stdio (to avoid conflicts)
-pico_enable_stdio_uart(pio_bus_interface 0)  # Disabled - we set up UART manually
-pico_enable_stdio_usb(pio_bus_interface 1)   # Enable USB for debugging
+# Enable USB stdio only
+pico_enable_stdio_uart(pio_bus_interface 0)
+pico_enable_stdio_usb(pio_bus_interface 1)
 
 # ============================================================================
 # RX-Only Safe Test Version
-# MCU never drives the bus - just logs all CPU writes to UART
+# MCU never drives the bus - just logs all CPU writes to USB serial
 # ============================================================================
 
 add_executable(pio_bus_interface_rx_only
@@ -70,10 +70,11 @@ target_link_libraries(pio_bus_interface_rx_only PUBLIC
     pico_stdlib
     hardware_pio
     hardware_gpio
-    hardware_uart
+    hardware_irq
 )
 
 pico_add_extra_outputs(pio_bus_interface_rx_only)
 
+# Enable USB stdio only
 pico_enable_stdio_uart(pio_bus_interface_rx_only 0)
 pico_enable_stdio_usb(pio_bus_interface_rx_only 1)
