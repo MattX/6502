@@ -23,9 +23,13 @@
  *
  */
 
+#include <stdio.h>
 #include "bsp/board_api.h"
 #include "tusb.h"
+
+#ifdef ENABLE_VIA_INTERFACE
 #include "via_interface.h"
+#endif
 
 //--------------------------------------------------------------------+
 // External functions from main.c
@@ -168,16 +172,26 @@ static void process_kbd_report(hid_keyboard_report_t const *report)
         bool const is_shift = report->modifier & (KEYBOARD_MODIFIER_LEFTSHIFT | KEYBOARD_MODIFIER_RIGHTSHIFT);
         uint8_t ch = keycode2ascii[report->keycode[i]][is_shift ? 1 : 0];
 
+#ifdef ENABLE_VIA_INTERFACE
         // Send to VIA buffer for breadboard computer
         if (ch != 0) {
           if (!via_add_keystroke(ch)) {
             printf("Failed to add keystroke to VIA buffer (full)\r\n");
           }
         }
+#endif
 
-        // Also print to debug console
-        putchar(ch);
-        if ( ch == '\r' ) putchar('\n'); // added new line for enter key
+        // Print to console with details
+        if (ch >= 0x20 && ch < 0x7F) {
+          // Printable character
+          printf("Key: '%c' (0x%02X) keycode=%d mod=0x%02X\r\n", ch, ch, report->keycode[i], report->modifier);
+        } else if (ch != 0) {
+          // Control character
+          printf("Key: 0x%02X keycode=%d mod=0x%02X\r\n", ch, report->keycode[i], report->modifier);
+        } else {
+          // Non-ASCII key (function keys, etc.)
+          printf("Key: [non-ASCII] keycode=%d mod=0x%02X\r\n", report->keycode[i], report->modifier);
+        }
 
         #ifndef __ICCARM__ // TODO IAR doesn't support stream control ?
         fflush(stdout); // flush right away, else nanolib will wait for newline

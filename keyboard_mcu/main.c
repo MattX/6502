@@ -27,10 +27,22 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "pico/stdlib.h"
 #include "pico/status_led.h"
+#include "hardware/uart.h"
+#include "hardware/gpio.h"
 #include "bsp/board_api.h"
 #include "tusb.h"
+
+#ifdef ENABLE_VIA_INTERFACE
 #include "via_interface.h"
+#endif
+
+// UART Console Configuration
+#define UART_ID uart0
+#define UART_BAUD_RATE 115200
+#define UART_TX_PIN 0
+#define UART_RX_PIN 1
 
 //--------------------------------------------------------------------+
 // MACRO CONSTANT TYPEDEF PROTYPES
@@ -66,13 +78,31 @@ extern bool tuh_max3421_reg_write(uint8_t rhport, uint8_t reg, uint8_t data, boo
 int main(void) {
   board_init();
 
+  // Initialize UART for console output on GPIO0 (TX) and GPIO1 (RX)
+  uart_init(UART_ID, UART_BAUD_RATE);
+  gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
+  gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
+
+  printf("\r\n");
+  printf("======================================\r\n");
+  printf("  6502 Keyboard MCU - RP2040\r\n");
+  printf("  UART Console on GPIO0/GPIO1\r\n");
+  printf("  Baud: %d\r\n", UART_BAUD_RATE);
+#ifdef ENABLE_VIA_INTERFACE
+  printf("  VIA Interface: ENABLED\r\n");
+#else
+  printf("  VIA Interface: DISABLED (test mode)\r\n");
+#endif
+  printf("======================================\r\n");
   printf("TinyUSB Host HID Keyboard Example\r\n");
 
   // Initialize status LED - MUST be called before using LED functions
   status_led_init();
 
+#ifdef ENABLE_VIA_INTERFACE
   // Initialize VIA interface for 6522 communication
   via_init();
+#endif
 
   // init host stack on configured roothub port
   tuh_init(BOARD_TUH_RHPORT);
@@ -92,8 +122,10 @@ int main(void) {
     // tinyusb host task
     tuh_task();
 
+#ifdef ENABLE_VIA_INTERFACE
     // VIA handshaking task
     via_task();
+#endif
 
     led_blinking_task();
     hid_app_task();
