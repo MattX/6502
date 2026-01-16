@@ -1,5 +1,9 @@
 /*
  * PIO-based 6502 Bus Interface Driver Implementation
+ *
+ * Simplified protocol without A0/status register:
+ *   Write: [device] [length] [data...]      (device bit 7 = 0)
+ *   Read:  [device|0x80] -> [length] [data...] or 0xFF if not ready
  */
 
 #include "bus_interface.h"
@@ -8,7 +12,6 @@
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
 #include "hardware/dma.h"
-#include "hardware/irq.h"
 
 #include <string.h>
 
@@ -42,15 +45,16 @@ static device_buffer_t device_tx_buffers[BUS_MAX_DEVICES];  // MCU -> CPU
 // Protocol state machine
 typedef enum {
     PROTO_IDLE,
-    PROTO_GOT_CMD,
+    PROTO_GOT_DEVICE,
     PROTO_RECEIVING,
+    PROTO_SEND_LENGTH,
     PROTO_SENDING
 } proto_state_t;
 
 static proto_state_t proto_state = PROTO_IDLE;
 static uint8_t current_device = 0;
 static uint16_t transfer_remaining = 0;
-static bool transfer_is_read = false;
+static bool pending_read_request = false;
 
 // Statistics
 static bus_stats_t stats = {0};
@@ -88,35 +92,35 @@ static void setup_dma(void) {
     // === RX DMA: PIO RX FIFO -> RAM buffer ===
     dma_channel_config rx_config = dma_channel_get_default_config(dma_rx_chan);
     channel_config_set_transfer_data_size(&rx_config, DMA_SIZE_32);
-    channel_config_set_read_increment(&rx_config, false);  // Always read from FIFO
-    channel_config_set_write_increment(&rx_config, true);  // Write to successive addresses
-    channel_config_set_ring(&rx_config, true, 10);         // Wrap write at 1024 bytes (256 words)
-    channel_config_set_dreq(&rx_config, pio_get_dreq(bus_pio, bus_sm, false)); // RX DREQ
+    channel_config_set_read_increment(&rx_config, false);
+    channel_config_set_write_increment(&rx_config, true);
+    channel_config_set_ring(&rx_config, true, 10);  // Wrap at 1024 bytes
+    channel_config_set_dreq(&rx_config, pio_get_dreq(bus_pio, bus_sm, false));
 
     dma_channel_configure(
         dma_rx_chan,
         &rx_config,
-        dma_rx_buffer,                      // Write to buffer
-        &bus_pio->rxf[bus_sm],              // Read from PIO RX FIFO
-        0xFFFFFFFF,                         // Transfer "forever" (will be retriggered)
-        false                               // Don't start yet
+        dma_rx_buffer,
+        &bus_pio->rxf[bus_sm],
+        0xFFFFFFFF,
+        false
     );
 
     // === TX DMA: RAM buffer -> PIO TX FIFO ===
     dma_channel_config tx_config = dma_channel_get_default_config(dma_tx_chan);
     channel_config_set_transfer_data_size(&tx_config, DMA_SIZE_32);
-    channel_config_set_read_increment(&tx_config, true);   // Read from successive addresses
-    channel_config_set_write_increment(&tx_config, false); // Always write to FIFO
-    channel_config_set_ring(&tx_config, false, 10);        // Wrap read at 1024 bytes (256 words)
-    channel_config_set_dreq(&tx_config, pio_get_dreq(bus_pio, bus_sm, true)); // TX DREQ
+    channel_config_set_read_increment(&tx_config, true);
+    channel_config_set_write_increment(&tx_config, false);
+    channel_config_set_ring(&tx_config, false, 10);
+    channel_config_set_dreq(&tx_config, pio_get_dreq(bus_pio, bus_sm, true));
 
     dma_channel_configure(
         dma_tx_chan,
         &tx_config,
-        &bus_pio->txf[bus_sm],              // Write to PIO TX FIFO
-        dma_tx_buffer,                      // Read from buffer
-        0xFFFFFFFF,                         // Transfer "forever"
-        false                               // Don't start yet
+        &bus_pio->txf[bus_sm],
+        dma_tx_buffer,
+        0xFFFFFFFF,
+        false
     );
 
     dma_rx_read_idx = 0;
@@ -124,39 +128,27 @@ static void setup_dma(void) {
 }
 
 void bus_start(void) {
-    // Start DMA channels
     dma_channel_start(dma_rx_chan);
     dma_channel_start(dma_tx_chan);
-
-    // Enable PIO state machine
     bus_interface_enable(bus_pio, bus_sm);
 }
 
 void bus_stop(void) {
-    // Disable PIO state machine
     bus_interface_disable(bus_pio, bus_sm);
-
-    // Stop DMA channels
     dma_channel_abort(dma_rx_chan);
     dma_channel_abort(dma_tx_chan);
 }
 
 void bus_task(void) {
-    // Process any received data from PIO RX FIFO
     process_rx_data();
-
-    // Feed TX FIFO with data to send
     feed_tx_fifo();
 }
 
-// Get current DMA write position in RX buffer
 static inline uint get_dma_rx_write_idx(void) {
-    // DMA write pointer is the current write address minus buffer base
     uint32_t write_addr = dma_channel_hw_addr(dma_rx_chan)->write_addr;
     return (write_addr - (uint32_t)dma_rx_buffer) / sizeof(uint32_t);
 }
 
-// Get current DMA read position in TX buffer
 static inline uint get_dma_tx_read_idx(void) {
     uint32_t read_addr = dma_channel_hw_addr(dma_tx_chan)->read_addr;
     return (read_addr - (uint32_t)dma_tx_buffer) / sizeof(uint32_t);
@@ -170,32 +162,32 @@ static void process_rx_data(void) {
         dma_rx_read_idx = (dma_rx_read_idx + 1) % DMA_BUFFER_SIZE;
         stats.rx_bytes++;
 
-        // Protocol state machine
         switch (proto_state) {
             case PROTO_IDLE:
-                // First byte is command: device number with optional read flag
+                // First byte: device number (bit 7 = read flag)
                 current_device = byte & 0x7F;
-                transfer_is_read = (byte & 0x80) != 0;
-                proto_state = PROTO_GOT_CMD;
+                if (byte & 0x80) {
+                    // Read request - queue response
+                    pending_read_request = true;
+                    proto_state = PROTO_IDLE;  // Stay idle, feed_tx_fifo handles response
+                } else {
+                    // Write request - expect length next
+                    proto_state = PROTO_GOT_DEVICE;
+                }
                 break;
 
-            case PROTO_GOT_CMD:
-                // Second byte is transfer length
+            case PROTO_GOT_DEVICE:
+                // Second byte: length
                 transfer_remaining = byte;
                 if (transfer_remaining == 0) {
-                    // Zero-length transfer, back to idle
                     proto_state = PROTO_IDLE;
-                } else if (transfer_is_read) {
-                    // Read request: queue data from device buffer to TX
-                    proto_state = PROTO_SENDING;
                 } else {
-                    // Write request: receive data into device buffer
                     proto_state = PROTO_RECEIVING;
                 }
                 break;
 
             case PROTO_RECEIVING:
-                // Store byte in device's RX buffer
+                // Store data in device buffer
                 {
                     device_buffer_t *buf = &device_rx_buffers[current_device];
                     if (buf->count < BUS_MAX_BUFFER_SIZE) {
@@ -212,54 +204,68 @@ static void process_rx_data(void) {
                 }
                 break;
 
+            case PROTO_SEND_LENGTH:
             case PROTO_SENDING:
-                // Unexpected data while sending - ignore or treat as new command
-                // For robustness, treat as new command
+                // Unexpected RX during send - treat as new command
                 current_device = byte & 0x7F;
-                transfer_is_read = (byte & 0x80) != 0;
-                proto_state = PROTO_GOT_CMD;
+                if (byte & 0x80) {
+                    pending_read_request = true;
+                    proto_state = PROTO_IDLE;
+                } else {
+                    proto_state = PROTO_GOT_DEVICE;
+                }
                 break;
         }
     }
 }
 
 static void feed_tx_fifo(void) {
-    // If we're in SENDING state, feed data to TX DMA buffer
-    if (proto_state != PROTO_SENDING) {
-        return;
-    }
-
     uint read_idx = get_dma_tx_read_idx();
 
-    // Calculate available space in TX buffer
-    // We can write up to (read_idx - write_idx - 1) mod SIZE entries
-    while (transfer_remaining > 0) {
-        uint next_write = (dma_tx_write_idx + 1) % DMA_BUFFER_SIZE;
-        if (next_write == read_idx) {
-            // Buffer full, wait for DMA to drain
-            break;
-        }
-
+    // Handle pending read request
+    if (pending_read_request) {
         device_buffer_t *buf = &device_tx_buffers[current_device];
-        uint8_t byte;
-        if (buf->count > 0) {
-            byte = buf->data[buf->tail];
-            buf->tail = (buf->tail + 1) % BUS_MAX_BUFFER_SIZE;
-            buf->count--;
-        } else {
-            // No data available, send zeros
-            byte = 0x00;
-            stats.tx_underflows++;
-        }
 
-        dma_tx_buffer[dma_tx_write_idx] = byte;
-        dma_tx_write_idx = next_write;
-        transfer_remaining--;
-        stats.tx_bytes++;
+        if (buf->count > 0) {
+            // Data available - send length then data
+            uint next_write = (dma_tx_write_idx + 1) % DMA_BUFFER_SIZE;
+            if (next_write != read_idx) {
+                // Send length (capped at 254)
+                uint8_t len = (buf->count > 254) ? 254 : buf->count;
+                dma_tx_buffer[dma_tx_write_idx] = len;
+                dma_tx_write_idx = next_write;
+                transfer_remaining = len;
+                proto_state = PROTO_SENDING;
+                pending_read_request = false;
+                stats.tx_bytes++;
+            }
+        }
+        // If no data available, TX FIFO stays empty -> CPU reads 0xFF
     }
 
-    if (transfer_remaining == 0) {
-        proto_state = PROTO_IDLE;
+    // Send data bytes
+    if (proto_state == PROTO_SENDING) {
+        device_buffer_t *buf = &device_tx_buffers[current_device];
+
+        while (transfer_remaining > 0 && buf->count > 0) {
+            uint next_write = (dma_tx_write_idx + 1) % DMA_BUFFER_SIZE;
+            if (next_write == read_idx) {
+                break;  // TX buffer full
+            }
+
+            uint8_t byte = buf->data[buf->tail];
+            buf->tail = (buf->tail + 1) % BUS_MAX_BUFFER_SIZE;
+            buf->count--;
+
+            dma_tx_buffer[dma_tx_write_idx] = byte;
+            dma_tx_write_idx = next_write;
+            transfer_remaining--;
+            stats.tx_bytes++;
+        }
+
+        if (transfer_remaining == 0) {
+            proto_state = PROTO_IDLE;
+        }
     }
 }
 

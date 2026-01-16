@@ -1,6 +1,6 @@
 # PIO-Based 6502 Bus Interface
 
-This project implements a memory-mapped register interface between a 6502 CPU and an RP2040 microcontroller using only PIO (Programmable I/O) and DMA, eliminating the need for external CPLD and latches.
+This project implements a byte-stream interface between a 6502 CPU and an RP2040 microcontroller using only PIO and DMA, eliminating the need for external CPLD and latches.
 
 ## Overview
 
@@ -18,120 +18,98 @@ This PIO-based approach requires:
 |------|--------|-----------|-------------|
 | 0-7 | D[7:0] | Bidirectional | 8-bit data bus |
 | 8 | PHI2 | Input | 6502 system clock |
-| 9 | CS_N | Input | Chip select (directly to JMP PIN) |
-| 10 | A0 | Input | Address bit 0 (register select) |
-| 11 | RW | Input | Read/Write (1=read, 0=write) |
+| 9 | CS_N | Input | Chip select |
+| 10 | RW | Input | Read/Write (1=read, 0=write) |
 | 16 | UART TX | Output | Debug console |
 | 17 | UART RX | Input | Debug console |
 
-## Register Map (6502 View)
-
-| A0 | R/W | Name | Description |
-|----|-----|------|-------------|
-| 0 | R | DATA | Read byte from MCU |
-| 0 | W | DATA | Write byte to MCU |
-| 1 | R | STATUS | D7=TX_AVAIL (1=data available) |
-| 1 | W | — | Reserved (no operation) |
+**Note:** A0 is NOT used. Status is implicit in the data stream (0xFF = not ready).
 
 ## Protocol
 
 ### Writing Data (6502 → MCU)
 
 ```
-6502 sends:
-  [device]    - Device number 0-127 (bit 7 = 0)
-  [length]    - Number of bytes to write (1-255)
-  [data...]   - The data bytes
+CPU writes: [device] [length] [data...]
+  - device: 0-127 (bit 7 must be 0)
+  - length: 1-255 bytes
+  - data: the payload
 ```
 
 ### Reading Data (MCU → 6502)
 
 ```
-6502 sends:
-  [device|0x80] - Device number with bit 7 set (read request)
-  [length]      - Number of bytes to read
-
-6502 reads:
-  [data...]     - The requested bytes
+CPU writes: [device | 0x80]    (bit 7 = read request)
+CPU reads:  [byte]
+  - If byte == 0xFF: not ready, keep reading
+  - If byte == 0x00-0xFE: this is the length, proceed
+CPU reads:  [data...] (length bytes)
 ```
+
+The 0xFF sentinel eliminates the need for a separate status register. The CPU simply polls by reading until it gets a non-0xFF value.
 
 ### 6502 Assembly Example
 
 ```asm
-DATA    = $DF00     ; Base address (CS active when A15-A8 = $DF)
-STATUS  = $DF01
+DATA = $DF00        ; Single register (directly memory-mapped)
 
 ; Write 4 bytes to device 5
 write_example:
-    ; Wait for TX_AVAIL (optional, ensures link is ready)
-    LDA #5              ; Device 5, write mode
-    JSR send_byte
-    LDA #4              ; Length = 4
-    JSR send_byte
-    LDA #$01            ; Data bytes
-    JSR send_byte
-    LDA #$02
-    JSR send_byte
-    LDA #$03
-    JSR send_byte
-    LDA #$04
-    JSR send_byte
-    RTS
-
-; Read 4 bytes from device 5
-read_example:
-    LDA #$85            ; Device 5 | 0x80 (read mode)
-    JSR send_byte
-    LDA #4              ; Request 4 bytes
-    JSR send_byte
-    ; Now read 4 bytes back
-    JSR recv_byte       ; First byte
-    STA buffer+0
-    JSR recv_byte
-    STA buffer+1
-    JSR recv_byte
-    STA buffer+2
-    JSR recv_byte
-    STA buffer+3
-    RTS
-
-; Send byte (wait for ready, then write)
-send_byte:
-    PHA
-.wait:
-    ; For writes, we assume MCU can keep up (DMA drains fast)
-    PLA
+    LDA #5          ; Device 5, write mode (bit 7 = 0)
+    STA DATA
+    LDA #4          ; Length = 4 bytes
+    STA DATA
+    LDA #$01        ; Data byte 1
+    STA DATA
+    LDA #$02        ; Data byte 2
+    STA DATA
+    LDA #$03        ; Data byte 3
+    STA DATA
+    LDA #$04        ; Data byte 4
     STA DATA
     RTS
 
-; Receive byte (wait for available, then read)
-recv_byte:
-.wait:
-    LDA STATUS
-    BPL .wait           ; Wait until bit 7 (TX_AVAIL) is set
+; Read from device 5
+read_example:
+    LDA #$85        ; Device 5 | 0x80 (read request)
+    STA DATA
+
+.wait_ready:
+    LDA DATA        ; Read length (or 0xFF if not ready)
+    CMP #$FF
+    BEQ .wait_ready ; Keep polling until ready
+
+    ; A = length (0-254)
+    TAX
+    BEQ .done       ; Zero length = nothing to read
+
+.read_loop:
     LDA DATA
+    STA (buffer),Y
+    INY
+    DEX
+    BNE .read_loop
+
+.done:
     RTS
 ```
 
 ## Loopback Test
 
-The included firmware implements a simple loopback test:
+The included firmware implements a loopback test:
 - Data written to device N is stored in that device's buffer
 - When reading from device N, the stored data is returned
-
-This allows testing the full data path without any external 6502 hardware.
 
 ## Building
 
 ```bash
 cd pio_bus_interface
-mkdir build
-cd build
+mkdir build && cd build
 cmake ..
 make
 ```
 
-The output `pio_bus_interface.uf2` can be flashed to a Pico by holding BOOTSEL and connecting USB.
+Flash `pio_bus_interface.uf2` to a Pico by holding BOOTSEL while connecting USB.
 
 ## Timing Analysis
 
@@ -139,34 +117,41 @@ At 125MHz PIO clock:
 
 | Operation | PIO Cycles | Time | Notes |
 |-----------|-----------|------|-------|
-| Data Read | 12 | 96ns | Decode + output + enable |
-| Status Read | 14 | 112ns | Longest path |
-| Data Write | 8 | 64ns | Fastest path |
+| Read | 10 | 80ns | Includes output enable |
+| Write | 8 | 64ns | Fastest path |
 
-**Recommended 6502 clock: 4MHz** (125ns PHI2 high window)
+**Works reliably at 5MHz 6502** (100ns PHI2 high, 20ns margin for reads).
 
-| 6502 Clock | PHI2 High | Status Read Margin |
-|------------|-----------|-------------------|
-| 4MHz | 125ns | 13ns |
-| 5MHz | 100ns | -12ns (too tight!) |
-| 3.58MHz | 140ns | 28ns (comfortable) |
+| 6502 Clock | PHI2 High | Read Margin |
+|------------|-----------|-------------|
+| 5MHz | 100ns | 20ns |
+| 4MHz | 125ns | 45ns |
+| 8MHz | 62.5ns | -17.5ns (too fast) |
 
-For 5MHz operation, consider:
-- Overclocking RP2040 to 150MHz+ (reduces cycle time to 6.7ns)
-- Using sideset with external buffer for faster output enable
+## How It Works
 
-## Status Register Implementation
+### Empty FIFO Returns 0xFF
 
-The key insight enabling this design is using PIO's `mov osr, ~status` instruction:
+The key insight: PIO's `pull noblock` instruction keeps OSR unchanged if the FIFO is empty. By initializing OSR to `0xFFFFFFFF`, empty reads naturally return `0xFF`.
 
-- Configure `EXECCTRL.STATUS_SEL = 0` (TX FIFO level)
-- Configure `EXECCTRL.STATUS_N = 1` (threshold = 1)
-- `status` = all-1s if TX FIFO empty, all-0s if TX has data
-- `~status` = all-0s if empty, all-1s if has data
+```asm
+do_read:
+    pull noblock        ; Get from FIFO, or keep OSR if empty
+    out pins, 8         ; Output byte (real data or 0xFF)
+    ; ... enable outputs, wait for PHI2 low, disable outputs ...
+    mov osr, ~null      ; Reset OSR to 0xFFFFFFFF for next empty read
+```
 
-This maps directly to the TX_AVAIL semantics without any ARM core involvement.
+### No Status Register Needed
 
-The RX_READY signal is eliminated because DMA can drain the RX FIFO faster than the 6502 can fill it (125MB/s DMA vs ~1MB/s max 6502 write rate).
+The protocol embeds status in the data stream:
+- **Write path**: CPU writes freely (DMA drains FIFO faster than 6502 can fill it)
+- **Read path**: CPU polls by reading; 0xFF means "not ready", anything else is the response length
+
+This eliminates:
+- The A0 address bit
+- The status register PIO path
+- The `mov osr, ~status` mechanism
 
 ## Architecture
 
@@ -176,10 +161,10 @@ The RX_READY signal is eliminated because DMA can drain the RX FIFO faster than 
 │                                                              │
 │   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    │
 │   │  PIO SM0    │◄──►│  DMA RX     │───►│  Device     │    │
-│   │             │    │  Channel    │    │  Buffers    │    │
-│   │  Bus        │    ├─────────────┤    │  [0..255]   │    │
-│   │  Interface  │◄──►│  DMA TX     │◄───│             │    │
-│   │             │    │  Channel    │    │             │    │
+│   │  (18 instr) │    │  Channel    │    │  Buffers    │    │
+│   │             │    ├─────────────┤    │  [0..127]   │    │
+│   │  Read/Write │◄──►│  DMA TX     │◄───│             │    │
+│   │  only       │    │  Channel    │    │             │    │
 │   └──────┬──────┘    └─────────────┘    └─────────────┘    │
 │          │                                                   │
 └──────────┼───────────────────────────────────────────────────┘
@@ -187,21 +172,24 @@ The RX_READY signal is eliminated because DMA can drain the RX FIFO faster than 
     ┌──────┴──────┐
     │  6502 Bus   │
     │  D[7:0]     │
-    │  PHI2       │
-    │  CS_N       │
-    │  A0, RW     │
+    │  PHI2, CS_N │
+    │  RW         │
     └─────────────┘
 ```
 
+## Comparison to Original Design
+
+| Aspect | CPLD + Latches | PIO (with A0) | PIO (simplified) |
+|--------|----------------|---------------|------------------|
+| External chips | 4 | 1 (addr decode) | 1 (addr decode) |
+| GPIO pins | 13 | 12 | **11** |
+| PIO instructions | — | 29 | **18** |
+| Read path (cycles) | — | 12 | **10** |
+| Status mechanism | Hardware | `~status` | **Implicit (0xFF)** |
+| Max response size | Unlimited | Unlimited | **254 bytes** |
+
 ## Limitations
 
-- Status register only reports TX_AVAIL (no RX_READY)
-- Tight timing at 5MHz - may need margin testing
-- Single PIO state machine limits to one bus interface per PIO block
-- 4-word PIO FIFO depth (8 with joining, but we need both directions)
-
-## Future Enhancements
-
-- Interrupt output (directly from PIO sideset) when TX_AVAIL
-- Multiple state machines for different address ranges
-- RP2350 port with additional PIO features
+- Maximum response length is 254 bytes (0xFF reserved for "not ready")
+- 128 device addresses (bit 7 used for read/write flag)
+- Single PIO state machine (one bus interface per PIO block)
