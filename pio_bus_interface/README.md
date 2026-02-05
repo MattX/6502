@@ -220,6 +220,81 @@ do_read:
     └─────────────┘
 ```
 
+## DMA Configuration
+
+The PIO FIFO is only 4 entries deep, which is insufficient for buffering at bus speeds. DMA extends this to 256-entry circular buffers without CPU intervention.
+
+### RX DMA (6502 → MCU)
+
+**Trigger:** PIO RX FIFO DREQ (fires when FIFO is non-empty)
+
+```c
+channel_config_set_dreq(&rx_config, pio_get_dreq(bus_pio, bus_sm, false));
+```
+
+**Configuration:**
+- **Source:** `&bus_pio->rxf[bus_sm]` (PIO RX FIFO, fixed address)
+- **Destination:** `dma_rx_buffer` (256-entry circular buffer)
+- **Transfer size:** 32-bit (matches PIO FIFO width)
+- **Increment:** Read=no, Write=yes
+- **Ring wrap:** Destination wraps at 1024 bytes (256 × 4)
+- **Transfer count:** 0xFFFFFFFF (effectively infinite)
+
+```c
+channel_config_set_read_increment(&rx_config, false);   // FIFO is fixed addr
+channel_config_set_write_increment(&rx_config, true);   // Advance in buffer
+channel_config_set_ring(&rx_config, true, 10);          // Wrap dest at 2^10
+```
+
+**Flow:** When PIO pushes a byte (via `push` instruction), DREQ fires → DMA transfers 32-bit word from FIFO to buffer → DMA advances write pointer (with ring wrap).
+
+### TX DMA (MCU → 6502)
+
+**Trigger:** PIO TX FIFO DREQ (fires when FIFO is not full)
+
+```c
+channel_config_set_dreq(&tx_config, pio_get_dreq(bus_pio, bus_sm, true));
+```
+
+**Configuration:**
+- **Source:** `dma_tx_buffer` (256-entry circular buffer)
+- **Destination:** `&bus_pio->txf[bus_sm]` (PIO TX FIFO, fixed address)
+- **Transfer size:** 32-bit (matches PIO FIFO width)
+- **Increment:** Read=yes, Write=no
+- **Ring wrap:** Source wraps at 1024 bytes (256 × 4)
+- **Transfer count:** 0xFFFFFFFF (effectively infinite)
+
+```c
+channel_config_set_read_increment(&tx_config, true);    // Advance in buffer
+channel_config_set_write_increment(&tx_config, false);  // FIFO is fixed addr
+channel_config_set_ring(&tx_config, false, 10);         // Wrap src at 2^10
+```
+
+**Flow:** When PIO pulls a byte (via `pull noblock`), TX FIFO may have room → DREQ fires → DMA transfers next word from buffer to FIFO → DMA advances read pointer (with ring wrap).
+
+### Buffer Position Tracking
+
+The CPU tracks buffer positions by reading DMA address registers:
+
+```c
+// Where has DMA written to? (RX)
+uint rx_write_idx = (dma_hw->ch[rx_chan].write_addr - (uint32_t)rx_buffer) / 4;
+
+// Where has DMA read from? (TX)
+uint tx_read_idx = (dma_hw->ch[tx_chan].read_addr - (uint32_t)tx_buffer) / 4;
+```
+
+The CPU maintains its own read index (RX) and write index (TX). Comparing these with the DMA positions reveals:
+- **RX:** `dma_write_idx != cpu_read_idx` → data available to process
+- **TX:** `cpu_write_idx != dma_read_idx` → space available to queue
+
+### Why 32-bit Transfers?
+
+PIO FIFOs are 32-bit wide. Even though we only use the low 8 bits for data:
+- DMA must transfer full 32-bit words
+- The upper 24 bits are ignored (RX) or zero-padded (TX)
+- This matches the PIO's `push`/`pull` word width
+
 ## Receive-Only Safe Test Mode
 
 The `pio_bus_interface_rx_only` firmware is for safe initial testing:
