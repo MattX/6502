@@ -1,0 +1,115 @@
+;
+; PIO-based 6502 Bus Interface - Receive Only (Safe Test Mode)
+;
+; Target: RP2350
+;
+; This is a minimal receive-only version for safe testing.
+; The MCU NEVER drives the data bus - only monitors writes from the CPU.
+;
+; Optimized pin mapping:
+;   GPIO 0:     RW     - read/write (1=read, 0=write) - bit 0 for fast extraction
+;   GPIO 1:     CS_N   - chip select (active low) - bit 1 for fast extraction
+;   GPIO 8:     PHI2   - 6502 system clock
+;   GPIO 22-29: D[7:0] - data bus (INPUT ONLY)
+;
+; This version ignores RW=1 (reads) entirely. When the CPU reads, it will
+; see whatever is on the bus (likely floating/pulled values), but that's
+; fine for testing - we just won't respond.
+;
+; Optimization: RW and CS_N are at GPIO 0-1, allowing combined 2-bit extraction:
+;   {CS_N, RW} = 0 -> write, selected (capture data)
+;   {CS_N, RW} = 1,2,3 -> ignore (read or not selected)
+;
+
+.program bus_interface_rx_only
+
+.define PUBLIC PIN_RW    0
+.define PUBLIC PIN_CS_N  1
+.define PUBLIC PIN_PHI2  8
+.define PUBLIC PIN_D0    22
+
+.wrap_target
+wait_cycle:
+    wait 1 gpio PIN_PHI2        ; 1 - Wait for PHI2 to go high
+
+    ; Read all pins: GPIO 0-29 into ISR (left shift: ISR[i] = GPIO[i])
+    in pins, 30                 ; 2
+    mov y, isr                  ; 3 - Save full pin state in y
+    in null, 32                 ; 4 - Clear ISR
+
+    ; Extract {CS_N, RW} as 2-bit value from bits [1:0]
+    mov osr, y                  ; 5
+    out x, 2                    ; 6 - x = {CS_N, RW}
+    jmp x-- wait_phi2_low       ; 7 - x!=0 -> skip (read or not selected)
+
+    ; === x=0: CS_N=0, RW=0 -> CPU writing to MCU ===
+do_write:
+    mov osr, y                  ; 8
+    out null, 22                ; 9  - Discard bits 0-21
+    out isr, 8                  ; 10 - ISR = bits 22-29 (D[7:0])
+    push                        ; 11 - Send to RX FIFO
+    ; Fall through to wait
+
+wait_phi2_low:
+    wait 0 gpio PIN_PHI2        ; Wait for PHI2 to go low
+.wrap
+
+% c-sdk {
+#include "hardware/gpio.h"
+
+// Control pin definitions (optimized: RW and CS_N adjacent for 2-bit extraction)
+#define BUS_PIN_RW      0
+#define BUS_PIN_CS_N    1
+#define BUS_PIN_PHI2    8
+
+// Data bus pins (consecutive, INPUT ONLY)
+#define BUS_PIN_D0      22
+#define BUS_PIN_D_COUNT 8
+
+static inline void bus_interface_rx_only_program_init(PIO pio, uint sm, uint offset) {
+    pio_sm_config c = bus_interface_rx_only_program_get_default_config(offset);
+
+    // IN pins start at GPIO 0 so we can read all control + data pins
+    // Use LEFT shift so ISR[i] = GPIO[i] for clean bit positions
+    sm_config_set_in_pins(&c, 0);
+    sm_config_set_in_shift(&c, false, false, 32);  // Shift LEFT, no autopush
+
+    // OUT shift for bit extraction (right shift)
+    sm_config_set_out_shift(&c, true, false, 32);  // Shift RIGHT
+
+    // Initialize control pins as inputs
+    gpio_init(BUS_PIN_RW);
+    gpio_set_dir(BUS_PIN_RW, GPIO_IN);
+    gpio_set_pulls(BUS_PIN_RW, true, false);    // Pull-up (read by default)
+
+    gpio_init(BUS_PIN_CS_N);
+    gpio_set_dir(BUS_PIN_CS_N, GPIO_IN);
+    gpio_set_pulls(BUS_PIN_CS_N, true, false);  // Pull-up (deselected by default)
+
+    gpio_init(BUS_PIN_PHI2);
+    gpio_set_dir(BUS_PIN_PHI2, GPIO_IN);
+    gpio_set_pulls(BUS_PIN_PHI2, false, false);
+
+    // Initialize data bus pins as INPUTS - NEVER configure as outputs!
+    for (int i = 0; i < BUS_PIN_D_COUNT; i++) {
+        uint pin = BUS_PIN_D0 + i;
+        gpio_init(pin);
+        gpio_set_dir(pin, GPIO_IN);
+        gpio_set_pulls(pin, false, false);
+    }
+
+    // Run at full system clock
+    sm_config_set_clkdiv(&c, 1.0f);
+
+    // Initialize state machine
+    pio_sm_init(pio, sm, offset, &c);
+}
+
+static inline void bus_interface_rx_only_enable(PIO pio, uint sm) {
+    pio_sm_set_enabled(pio, sm, true);
+}
+
+static inline void bus_interface_rx_only_disable(PIO pio, uint sm) {
+    pio_sm_set_enabled(pio, sm, false);
+}
+%}

@@ -1,0 +1,146 @@
+;
+; PIO-based 6502 Bus Interface (Simplified Protocol)
+;
+; Target: RP2350
+;
+; Optimized pin mapping:
+;   GPIO 0:     RW     - read/write (1=read, 0=write) - bit 0 for fast extraction
+;   GPIO 1:     CS_N   - chip select (active low) - bit 1 for fast extraction
+;   GPIO 8:     PHI2   - 6502 system clock
+;   GPIO 22-29: D[7:0] - data bus
+;
+; Protocol (0xFF sentinel, no A0):
+;   Write (CPU -> MCU): [device] [length] [data...]
+;   Read (MCU -> CPU):  [device|0x80] -> poll until != 0xFF, that's length, then read data
+;
+; The PIO uses `pull noblock` which keeps OSR unchanged when FIFO is empty.
+; OSR is initialized to 0xFF, so reads return 0xFF (not ready) until data is available.
+;
+; Optimization: RW and CS_N are at GPIO 0-1, allowing combined 2-bit extraction:
+;   {CS_N, RW} = 0 -> write, selected
+;   {CS_N, RW} = 1 -> read, selected
+;   {CS_N, RW} = 2,3 -> not selected
+;
+
+.program bus_interface
+
+.define PUBLIC PIN_RW    0
+.define PUBLIC PIN_CS_N  1
+.define PUBLIC PIN_PHI2  8
+.define PUBLIC PIN_D0    22
+
+.wrap_target
+wait_cycle:
+    wait 1 gpio PIN_PHI2        ; 1 - Wait for PHI2 to go high
+
+    ; Read all pins: GPIO 0-29 into ISR (left shift: ISR[i] = GPIO[i])
+    in pins, 30                 ; 2
+    mov y, isr                  ; 3 - Save full pin state in y
+    in null, 32                 ; 4 - Clear ISR
+
+    ; Extract {CS_N, RW} as 2-bit value from bits [1:0]
+    mov osr, y                  ; 5
+    out x, 2                    ; 6 - x = {CS_N, RW}
+    jmp x-- not_write           ; 7 - x=0 -> write; x!=0 -> jump
+
+    ; === x=0: CS_N=0, RW=0 -> CPU writing to MCU ===
+do_write:
+    mov osr, y                  ; 8
+    out null, 22                ; 9  - Discard bits 0-21
+    out isr, 8                  ; 10 - ISR = bits 22-29 (D[7:0])
+    push                        ; 11 - Send to RX FIFO
+    jmp wait_phi2_low           ; 12
+
+not_write:
+    ; x was 1, 2, or 3 (now decremented to 0, 1, or 2)
+    jmp x-- wait_phi2_low       ; 8 - x!=0 (was 2 or 3) -> not selected
+
+    ; === x was 1: CS_N=0, RW=1 -> CPU reading from MCU ===
+do_read:
+    pull noblock                ; 9  - Get data from TX FIFO (or keep 0xFF sentinel)
+    out pins, 8                 ; 10 - Set up data on pin output registers
+
+    ; Enable data pins as outputs
+    mov osr, ~null              ; 11 - OSR = 0xFFFFFFFF
+    out pindirs, 8              ; 12 - Enable outputs on GPIO 22-29
+
+    wait 0 gpio PIN_PHI2        ; Wait for PHI2 to fall
+
+    ; Set data pins back to inputs (high-Z)
+    mov osr, null               ; 13 - OSR = 0
+    out pindirs, 8              ; 14 - Disable outputs on GPIO 22-29
+
+    ; Reload sentinel value for next read
+    mov osr, ~null              ; 15 - OSR = 0xFFFFFFFF (so pull noblock returns 0xFF)
+    jmp wait_cycle              ; 16
+
+wait_phi2_low:
+    wait 0 gpio PIN_PHI2        ; Wait for PHI2 to go low
+.wrap
+
+% c-sdk {
+#include "hardware/gpio.h"
+
+// Control pin definitions (optimized: RW and CS_N adjacent for 2-bit extraction)
+#define BUS_PIN_RW      0
+#define BUS_PIN_CS_N    1
+#define BUS_PIN_PHI2    8
+
+// Data bus pins (consecutive for PIO)
+#define BUS_PIN_D0      22
+#define BUS_PIN_D_COUNT 8
+
+static inline void bus_interface_program_init(PIO pio, uint sm, uint offset) {
+    pio_sm_config c = bus_interface_program_get_default_config(offset);
+
+    // IN pins start at GPIO 0 so we can read all control + data pins
+    // Use LEFT shift so ISR[i] = GPIO[i] for clean bit positions
+    sm_config_set_in_pins(&c, 0);
+    sm_config_set_in_shift(&c, false, false, 32);  // Shift LEFT, no autopush
+
+    // OUT pins start at D0 (GPIO 22) for data bus writes
+    // Use RIGHT shift for standard LSB-first output
+    sm_config_set_out_pins(&c, BUS_PIN_D0, BUS_PIN_D_COUNT);
+    sm_config_set_out_shift(&c, true, false, 32);  // Shift RIGHT, no autopull
+
+    // Initialize control pins as inputs
+    gpio_init(BUS_PIN_RW);
+    gpio_set_dir(BUS_PIN_RW, GPIO_IN);
+    gpio_set_pulls(BUS_PIN_RW, true, false);    // Pull-up (read by default)
+
+    gpio_init(BUS_PIN_CS_N);
+    gpio_set_dir(BUS_PIN_CS_N, GPIO_IN);
+    gpio_set_pulls(BUS_PIN_CS_N, true, false);  // Pull-up (deselected by default)
+
+    gpio_init(BUS_PIN_PHI2);
+    gpio_set_dir(BUS_PIN_PHI2, GPIO_IN);
+    gpio_set_pulls(BUS_PIN_PHI2, false, false);
+
+    // Initialize data bus pins
+    for (int i = 0; i < BUS_PIN_D_COUNT; i++) {
+        uint pin = BUS_PIN_D0 + i;
+        gpio_init(pin);
+        gpio_set_dir(pin, GPIO_IN);  // Start as input (high-Z)
+        gpio_set_pulls(pin, false, false);
+        pio_gpio_init(pio, pin);     // Hand pin to PIO
+    }
+
+    // Run at full system clock
+    sm_config_set_clkdiv(&c, 1.0f);
+
+    // Initialize state machine
+    pio_sm_init(pio, sm, offset, &c);
+
+    // Pre-load OSR with 0xFF sentinel
+    pio_sm_put(pio, sm, 0xFFFFFFFF);
+    pio_sm_exec(pio, sm, pio_encode_pull(false, false));
+}
+
+static inline void bus_interface_enable(PIO pio, uint sm) {
+    pio_sm_set_enabled(pio, sm, true);
+}
+
+static inline void bus_interface_disable(PIO pio, uint sm) {
+    pio_sm_set_enabled(pio, sm, false);
+}
+%}
