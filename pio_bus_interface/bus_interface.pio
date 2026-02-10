@@ -6,8 +6,8 @@
 ; Optimized pin mapping:
 ;   GPIO 0:     RW     - read/write (1=read, 0=write) - bit 0 for fast extraction
 ;   GPIO 1:     CS_N   - chip select (active low) - bit 1 for fast extraction
-;   GPIO 8:     PHI2   - 6502 system clock
-;   GPIO 22-29: D[7:0] - data bus
+;   GPIO 2:     PHI2   - 6502 system clock
+;   GPIO 6-13:  D[7:0] - data bus
 ;
 ; Protocol (0xFF sentinel, no A0):
 ;   Write (CPU -> MCU): [device] [length] [data...]
@@ -26,8 +26,8 @@
 
 .define PUBLIC PIN_RW    0
 .define PUBLIC PIN_CS_N  1
-.define PUBLIC PIN_PHI2  8
-.define PUBLIC PIN_D0    22
+.define PUBLIC PIN_PHI2  2
+.define PUBLIC PIN_D0    6
 
 .wrap_target
 wait_cycle:
@@ -46,8 +46,8 @@ wait_cycle:
     ; === x=0: CS_N=0, RW=0 -> CPU writing to MCU ===
 do_write:
     mov osr, y                  ; 8
-    out null, 22                ; 9  - Discard bits 0-21
-    out isr, 8                  ; 10 - ISR = bits 22-29 (D[7:0])
+    out null, 6                 ; 9  - Discard bits 0-5
+    out isr, 8                  ; 10 - ISR = bits 6-13 (D[7:0])
     push                        ; 11 - Send to RX FIFO
     jmp wait_phi2_low           ; 12
 
@@ -62,13 +62,13 @@ do_read:
 
     ; Enable data pins as outputs
     mov osr, ~null              ; 11 - OSR = 0xFFFFFFFF
-    out pindirs, 8              ; 12 - Enable outputs on GPIO 22-29
+    out pindirs, 8              ; 12 - Enable outputs on GPIO 6-13
 
     wait 0 gpio PIN_PHI2        ; Wait for PHI2 to fall
 
     ; Set data pins back to inputs (high-Z)
     mov osr, null               ; 13 - OSR = 0
-    out pindirs, 8              ; 14 - Disable outputs on GPIO 22-29
+    out pindirs, 8              ; 14 - Disable outputs on GPIO 6-13
 
     ; Reload sentinel value for next read
     mov osr, ~null              ; 15 - OSR = 0xFFFFFFFF (so pull noblock returns 0xFF)
@@ -84,10 +84,10 @@ wait_phi2_low:
 // Control pin definitions (optimized: RW and CS_N adjacent for 2-bit extraction)
 #define BUS_PIN_RW      0
 #define BUS_PIN_CS_N    1
-#define BUS_PIN_PHI2    8
+#define BUS_PIN_PHI2    2
 
 // Data bus pins (consecutive for PIO)
-#define BUS_PIN_D0      22
+#define BUS_PIN_D0      6
 #define BUS_PIN_D_COUNT 8
 
 static inline void bus_interface_program_init(PIO pio, uint sm, uint offset) {
@@ -98,7 +98,7 @@ static inline void bus_interface_program_init(PIO pio, uint sm, uint offset) {
     sm_config_set_in_pins(&c, 0);
     sm_config_set_in_shift(&c, false, false, 32);  // Shift LEFT, no autopush
 
-    // OUT pins start at D0 (GPIO 22) for data bus writes
+    // OUT pins start at D0 (GPIO 6) for data bus writes
     // Use RIGHT shift for standard LSB-first output
     sm_config_set_out_pins(&c, BUS_PIN_D0, BUS_PIN_D_COUNT);
     sm_config_set_out_shift(&c, true, false, 32);  // Shift RIGHT, no autopull

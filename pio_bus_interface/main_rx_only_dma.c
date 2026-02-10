@@ -55,8 +55,8 @@ int main(void) {
     printf("Pin mapping:\n");
     printf("  GPIO 0:     RW\n");
     printf("  GPIO 1:     CS_N\n");
-    printf("  GPIO 8:     PHI2\n");
-    printf("  GPIO 22-29: D[7:0] data bus\n");
+    printf("  GPIO 2:     PHI2\n");
+    printf("  GPIO 6-13:  D[7:0] data bus\n");
     printf("\n");
     printf("DMA + protocol parser enabled (read requests ignored).\n");
     printf("----------------------------------------------------\n");
