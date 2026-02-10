@@ -30,6 +30,7 @@ static uint32_t dma_rx_buffer[DMA_BUFFER_SIZE];
 static uint32_t dma_tx_buffer[DMA_BUFFER_SIZE];
 static volatile uint dma_rx_read_idx = 0;
 static volatile uint dma_tx_write_idx = 0;
+static uint32_t dma_rx_total_read = 0;
 
 // Device buffers
 typedef struct {
@@ -47,7 +48,6 @@ typedef enum {
     PROTO_IDLE,
     PROTO_GOT_DEVICE,
     PROTO_RECEIVING,
-    PROTO_SEND_LENGTH,
     PROTO_SENDING
 } proto_state_t;
 
@@ -55,6 +55,7 @@ static proto_state_t proto_state = PROTO_IDLE;
 static uint8_t current_device = 0;
 static uint16_t transfer_remaining = 0;
 static bool pending_read_request = false;
+static bool read_underflow_recorded = false;
 
 // Statistics
 static bus_stats_t stats = {0};
@@ -149,17 +150,32 @@ static inline uint get_dma_rx_write_idx(void) {
     return (write_addr - (uint32_t)dma_rx_buffer) / sizeof(uint32_t);
 }
 
+static inline uint32_t get_dma_rx_total_written(void) {
+    uint32_t remaining = dma_channel_hw_addr(dma_rx_chan)->transfer_count;
+    return 0xFFFFFFFFu - remaining;
+}
+
 static inline uint get_dma_tx_read_idx(void) {
     uint32_t read_addr = dma_channel_hw_addr(dma_tx_chan)->read_addr;
     return (read_addr - (uint32_t)dma_tx_buffer) / sizeof(uint32_t);
 }
 
 static void process_rx_data(void) {
+    uint32_t total_written = get_dma_rx_total_written();
+    uint32_t unread = total_written - dma_rx_total_read;
     uint write_idx = get_dma_rx_write_idx();
+
+    if (unread > DMA_BUFFER_SIZE) {
+        stats.rx_dma_overruns++;
+        dma_rx_read_idx = write_idx;
+        dma_rx_total_read = total_written;
+        return;
+    }
 
     while (dma_rx_read_idx != write_idx) {
         uint8_t byte = dma_rx_buffer[dma_rx_read_idx] & 0xFF;
         dma_rx_read_idx = (dma_rx_read_idx + 1) % DMA_BUFFER_SIZE;
+        dma_rx_total_read++;
         stats.rx_bytes++;
 
         switch (proto_state) {
@@ -169,6 +185,7 @@ static void process_rx_data(void) {
                 if (byte & 0x80) {
                     // Read request - queue response
                     pending_read_request = true;
+                    read_underflow_recorded = false;
                     proto_state = PROTO_IDLE;  // Stay idle, feed_tx_fifo handles response
                 } else {
                     // Write request - expect length next
@@ -204,12 +221,12 @@ static void process_rx_data(void) {
                 }
                 break;
 
-            case PROTO_SEND_LENGTH:
             case PROTO_SENDING:
                 // Unexpected RX during send - treat as new command
                 current_device = byte & 0x7F;
                 if (byte & 0x80) {
                     pending_read_request = true;
+                    read_underflow_recorded = false;
                     proto_state = PROTO_IDLE;
                 } else {
                     proto_state = PROTO_GOT_DEVICE;
@@ -237,8 +254,12 @@ static void feed_tx_fifo(void) {
                 transfer_remaining = len;
                 proto_state = PROTO_SENDING;
                 pending_read_request = false;
+                read_underflow_recorded = false;
                 stats.tx_bytes++;
             }
+        } else if (!read_underflow_recorded) {
+            stats.tx_underflows++;
+            read_underflow_recorded = true;
         }
         // If no data available, TX FIFO stays empty -> CPU reads 0xFF
     }

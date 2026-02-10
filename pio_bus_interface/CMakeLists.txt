@@ -80,3 +80,33 @@ pico_add_extra_outputs(pio_bus_interface_rx_only)
 # Enable USB stdio only
 pico_enable_stdio_uart(pio_bus_interface_rx_only 0)
 pico_enable_stdio_usb(pio_bus_interface_rx_only 1)
+
+# ============================================================================
+# RX-Only DMA + Parser Test Version
+# MCU never drives the bus - exercises DMA + protocol parser
+# ============================================================================
+
+add_executable(pio_bus_interface_rx_only_dma
+    main_rx_only_dma.c
+    bus_interface_rx_only.c
+)
+
+pico_generate_pio_header(pio_bus_interface_rx_only_dma
+    ${CMAKE_CURRENT_LIST_DIR}/bus_interface_rx_only.pio)
+
+target_include_directories(pio_bus_interface_rx_only_dma PUBLIC
+    ${CMAKE_CURRENT_LIST_DIR}
+)
+
+target_link_libraries(pio_bus_interface_rx_only_dma PUBLIC
+    pico_stdlib
+    hardware_pio
+    hardware_dma
+    hardware_gpio
+)
+
+pico_add_extra_outputs(pio_bus_interface_rx_only_dma)
+
+# Enable USB stdio only
+pico_enable_stdio_uart(pio_bus_interface_rx_only_dma 0)
+pico_enable_stdio_usb(pio_bus_interface_rx_only_dma 1)

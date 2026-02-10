@@ -50,6 +50,7 @@ typedef struct {
     uint32_t rx_bytes;      // Total bytes received from CPU
     uint32_t tx_bytes;      // Total bytes sent to CPU
     uint32_t rx_overflows;  // RX buffer overflow count
+    uint32_t rx_dma_overruns; // RX DMA ring overrun count
     uint32_t tx_underflows; // TX FIFO underflow count (reads when empty)
 } bus_stats_t;
 
