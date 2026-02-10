@@ -23,12 +23,12 @@ This PIO-based approach requires:
 |------|--------|-----------|-------------|
 | 0 | RW | Input | Read/Write (1=read, 0=write) |
 | 1 | CS_N | Input | Chip select (active low) |
-| 8 | PHI2 | Input | 6502 system clock |
-| 22-29 | D[7:0] | Bidirectional | 8-bit data bus |
+| 2 | PHI2 | Input | 6502 system clock |
+| 6-13 | D[7:0] | Bidirectional | 8-bit data bus |
 
 **Optimization notes:**
 - RW and CS_N are at GPIO 0-1 for fast 2-bit combined extraction
-- Data bus uses GPIO 22-29 (consecutive pins required for PIO `in pins`/`out pins`)
+- Data bus uses GPIO 6-13 (consecutive pins required for PIO `in pins`/`out pins`)
 - A0 is NOT used - status is implicit in the data stream (0xFF = not ready)
 
 ### Combined CS_N/RW Extraction
@@ -213,8 +213,8 @@ do_read:
            │
     ┌──────┴──────┐
     │  6502 Bus   │
-    │  D[7:0]     │ ← GPIO 22-29
-    │  PHI2       │ ← GPIO 8
+    │  D[7:0]     │ ← GPIO 6-13
+    │  PHI2       │ ← GPIO 2
     │  RW         │ ← GPIO 0
     │  CS_N       │ ← GPIO 1
     └─────────────┘
