@@ -25,7 +25,7 @@ static int dma_rx_chan = -1;
 
 // DMA buffer (circular)
 #define DMA_BUFFER_SIZE 256
-static uint32_t dma_rx_buffer[DMA_BUFFER_SIZE];
+static uint32_t __attribute__((aligned(1024))) dma_rx_buffer[DMA_BUFFER_SIZE];
 static volatile uint dma_rx_read_idx = 0;
 static uint32_t dma_rx_total_read = 0;
 
@@ -150,6 +150,10 @@ static void process_rx_data(void) {
             case PROTO_IDLE:
                 // First byte: device number (bit 7 = read flag)
                 current_device = byte & 0x7F;
+                if (current_device >= BUS_RX_ONLY_MAX_DEVICES) {
+                    // Invalid device - discard and stay idle
+                    break;
+                }
                 if (byte & 0x80) {
                     // Read request - ignore in RX-only mode
                     stats.rx_read_requests++;
@@ -192,10 +196,12 @@ static void process_rx_data(void) {
 }
 
 uint16_t bus_rx_only_device_available(uint8_t device) {
+    if (device >= BUS_RX_ONLY_MAX_DEVICES) return 0;
     return device_rx_buffers[device].count;
 }
 
 uint16_t bus_rx_only_device_read(uint8_t device, uint8_t *buffer, uint16_t max_len) {
+    if (device >= BUS_RX_ONLY_MAX_DEVICES) return 0;
     device_buffer_t *buf = &device_rx_buffers[device];
     uint16_t to_read = (buf->count < max_len) ? buf->count : max_len;
 
@@ -209,6 +215,7 @@ uint16_t bus_rx_only_device_read(uint8_t device, uint8_t *buffer, uint16_t max_l
 }
 
 void bus_rx_only_device_clear(uint8_t device) {
+    if (device >= BUS_RX_ONLY_MAX_DEVICES) return;
     device_rx_buffers[device].head = 0;
     device_rx_buffers[device].tail = 0;
     device_rx_buffers[device].count = 0;
