@@ -12,10 +12,10 @@
 #include <stdbool.h>
 
 // Maximum number of devices (channels)
-#define BUS_MAX_DEVICES     256
+#define BUS_MAX_DEVICES     8
 
 // Maximum buffer size per device
-#define BUS_MAX_BUFFER_SIZE 256
+#define BUS_MAX_BUFFER_SIZE 1024
 
 // Initialize the bus interface (PIO + DMA)
 // Returns true on success, false on failure
@@ -54,7 +54,7 @@ typedef struct {
     uint32_t tx_underflows; // TX FIFO underflow count (reads when empty)
 } bus_stats_t;
 
-void bus_get_stats(bus_stats_t *stats);
+bus_stats_t bus_get_stats(void);
 void bus_clear_stats(void);
 
 #endif // BUS_INTERFACE_H

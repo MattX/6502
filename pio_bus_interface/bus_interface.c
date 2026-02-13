@@ -24,13 +24,14 @@ static uint bus_program_offset;
 static int dma_rx_chan = -1;
 static int dma_tx_chan = -1;
 
-// DMA buffers (circular)
-#define DMA_BUFFER_SIZE 256
-static uint32_t dma_rx_buffer[DMA_BUFFER_SIZE];
-static uint32_t dma_tx_buffer[DMA_BUFFER_SIZE];
+// DMA buffers
+#define DMA_BUFFER_SIZE 1024
+static uint32_t __attribute__((aligned(4096))) dma_rx_buffer[DMA_BUFFER_SIZE];
 static volatile uint dma_rx_read_idx = 0;
-static volatile uint dma_tx_write_idx = 0;
 static uint32_t dma_rx_total_read = 0;
+
+// One-shot TX DMA staging buffer (each byte widened to a 32-bit word)
+static uint32_t tx_staging[256];
 
 // Device buffers
 typedef struct {
@@ -107,30 +108,11 @@ static void setup_dma(void) {
         false
     );
 
-    // === TX DMA: RAM buffer -> PIO TX FIFO ===
-    dma_channel_config tx_config = dma_channel_get_default_config(dma_tx_chan);
-    channel_config_set_transfer_data_size(&tx_config, DMA_SIZE_32);
-    channel_config_set_read_increment(&tx_config, true);
-    channel_config_set_write_increment(&tx_config, false);
-    channel_config_set_ring(&tx_config, false, 10);
-    channel_config_set_dreq(&tx_config, pio_get_dreq(bus_pio, bus_sm, true));
-
-    dma_channel_configure(
-        dma_tx_chan,
-        &tx_config,
-        &bus_pio->txf[bus_sm],
-        dma_tx_buffer,
-        0xFFFFFFFF,
-        false
-    );
-
     dma_rx_read_idx = 0;
-    dma_tx_write_idx = 0;
 }
 
 void bus_start(void) {
     dma_channel_start(dma_rx_chan);
-    dma_channel_start(dma_tx_chan);
     bus_interface_enable(bus_pio, bus_sm);
 }
 
@@ -138,6 +120,7 @@ void bus_stop(void) {
     bus_interface_disable(bus_pio, bus_sm);
     dma_channel_abort(dma_rx_chan);
     dma_channel_abort(dma_tx_chan);
+    proto_state = PROTO_IDLE;
 }
 
 void bus_task(void) {
@@ -153,11 +136,6 @@ static inline uint get_dma_rx_write_idx(void) {
 static inline uint32_t get_dma_rx_total_written(void) {
     uint32_t remaining = dma_channel_hw_addr(dma_rx_chan)->transfer_count;
     return 0xFFFFFFFFu - remaining;
-}
-
-static inline uint get_dma_tx_read_idx(void) {
-    uint32_t read_addr = dma_channel_hw_addr(dma_tx_chan)->read_addr;
-    return (read_addr - (uint32_t)dma_tx_buffer) / sizeof(uint32_t);
 }
 
 static void process_rx_data(void) {
@@ -182,6 +160,10 @@ static void process_rx_data(void) {
             case PROTO_IDLE:
                 // First byte: device number (bit 7 = read flag)
                 current_device = byte & 0x7F;
+                if (current_device >= BUS_MAX_DEVICES) {
+                    // Invalid device - discard and stay idle
+                    break;
+                }
                 if (byte & 0x80) {
                     // Read request - queue response
                     pending_read_request = true;
@@ -224,6 +206,11 @@ static void process_rx_data(void) {
             case PROTO_SENDING:
                 // Unexpected RX during send - treat as new command
                 current_device = byte & 0x7F;
+                if (current_device >= BUS_MAX_DEVICES) {
+                    // Invalid device - discard and return to idle
+                    proto_state = PROTO_IDLE;
+                    break;
+                }
                 if (byte & 0x80) {
                     pending_read_request = true;
                     read_underflow_recorded = false;
@@ -237,64 +224,62 @@ static void process_rx_data(void) {
 }
 
 static void feed_tx_fifo(void) {
-    uint read_idx = get_dma_tx_read_idx();
+    // Check if a previous one-shot DMA has completed
+    if (proto_state == PROTO_SENDING && !dma_channel_is_busy(dma_tx_chan)) {
+        proto_state = PROTO_IDLE;
+    }
 
-    // Handle pending read request
-    if (pending_read_request) {
+    // Handle pending read request (only if no DMA in flight)
+    if (pending_read_request && proto_state != PROTO_SENDING) {
         device_buffer_t *buf = &device_tx_buffers[current_device];
 
         if (buf->count > 0) {
-            // Data available - send length then data
-            uint next_write = (dma_tx_write_idx + 1) % DMA_BUFFER_SIZE;
-            if (next_write != read_idx) {
-                // Send length (capped at 254)
-                uint8_t len = (buf->count > 254) ? 254 : buf->count;
-                dma_tx_buffer[dma_tx_write_idx] = len;
-                dma_tx_write_idx = next_write;
-                transfer_remaining = len;
-                proto_state = PROTO_SENDING;
-                pending_read_request = false;
-                read_underflow_recorded = false;
-                stats.tx_bytes++;
+            // Build staging buffer: [length, data0, data1, ...]
+            uint8_t len = (buf->count > 254) ? 254 : buf->count;
+            tx_staging[0] = (uint32_t)len;
+
+            for (uint16_t i = 0; i < len; i++) {
+                tx_staging[1 + i] = (uint32_t)buf->data[buf->tail];
+                buf->tail = (buf->tail + 1) % BUS_MAX_BUFFER_SIZE;
+                buf->count--;
             }
+
+            stats.tx_bytes += len;
+
+            // Configure and start one-shot DMA transfer
+            dma_channel_config tx_config = dma_channel_get_default_config(dma_tx_chan);
+            channel_config_set_transfer_data_size(&tx_config, DMA_SIZE_32);
+            channel_config_set_read_increment(&tx_config, true);
+            channel_config_set_write_increment(&tx_config, false);
+            channel_config_set_dreq(&tx_config, pio_get_dreq(bus_pio, bus_sm, true));
+
+            dma_channel_configure(
+                dma_tx_chan,
+                &tx_config,
+                &bus_pio->txf[bus_sm],
+                tx_staging,
+                len + 1,
+                true  // Start immediately
+            );
+
+            proto_state = PROTO_SENDING;
+            pending_read_request = false;
+            read_underflow_recorded = false;
         } else if (!read_underflow_recorded) {
+            // No data available - leave FIFO empty (sentinel handles it)
             stats.tx_underflows++;
             read_underflow_recorded = true;
-        }
-        // If no data available, TX FIFO stays empty -> CPU reads 0xFF
-    }
-
-    // Send data bytes
-    if (proto_state == PROTO_SENDING) {
-        device_buffer_t *buf = &device_tx_buffers[current_device];
-
-        while (transfer_remaining > 0 && buf->count > 0) {
-            uint next_write = (dma_tx_write_idx + 1) % DMA_BUFFER_SIZE;
-            if (next_write == read_idx) {
-                break;  // TX buffer full
-            }
-
-            uint8_t byte = buf->data[buf->tail];
-            buf->tail = (buf->tail + 1) % BUS_MAX_BUFFER_SIZE;
-            buf->count--;
-
-            dma_tx_buffer[dma_tx_write_idx] = byte;
-            dma_tx_write_idx = next_write;
-            transfer_remaining--;
-            stats.tx_bytes++;
-        }
-
-        if (transfer_remaining == 0) {
-            proto_state = PROTO_IDLE;
         }
     }
 }
 
 uint16_t bus_device_rx_available(uint8_t device) {
+    if (device >= BUS_MAX_DEVICES) return 0;
     return device_rx_buffers[device].count;
 }
 
 uint16_t bus_device_read(uint8_t device, uint8_t *buffer, uint16_t max_len) {
+    if (device >= BUS_MAX_DEVICES) return 0;
     device_buffer_t *buf = &device_rx_buffers[device];
     uint16_t to_read = (buf->count < max_len) ? buf->count : max_len;
 
@@ -308,6 +293,7 @@ uint16_t bus_device_read(uint8_t device, uint8_t *buffer, uint16_t max_len) {
 }
 
 uint16_t bus_device_write(uint8_t device, const uint8_t *data, uint16_t len) {
+    if (device >= BUS_MAX_DEVICES) return 0;
     device_buffer_t *buf = &device_tx_buffers[device];
     uint16_t space = BUS_MAX_BUFFER_SIZE - buf->count;
     uint16_t to_write = (len < space) ? len : space;
@@ -322,6 +308,7 @@ uint16_t bus_device_write(uint8_t device, const uint8_t *data, uint16_t len) {
 }
 
 void bus_device_clear(uint8_t device) {
+    if (device >= BUS_MAX_DEVICES) return;
     device_rx_buffers[device].head = 0;
     device_rx_buffers[device].tail = 0;
     device_rx_buffers[device].count = 0;
@@ -331,8 +318,8 @@ void bus_device_clear(uint8_t device) {
     device_tx_buffers[device].count = 0;
 }
 
-void bus_get_stats(bus_stats_t *s) {
-    *s = stats;
+bus_stats_t bus_get_stats(void) {
+    return stats;
 }
 
 void bus_clear_stats(void) {
