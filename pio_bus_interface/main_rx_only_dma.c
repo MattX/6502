@@ -50,6 +50,7 @@ static void hexdump_callback(uint8_t device, const uint8_t *data, uint16_t len) 
 
 int main(void) {
     stdio_init_all();
+    sleep_ms(2000);  // let USB settle
 
     printf("\n");
     printf("====================================================\n");

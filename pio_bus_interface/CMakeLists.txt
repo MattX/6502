@@ -82,3 +82,20 @@ pico_add_extra_outputs(pio_bus_interface_rx_only_dma)
 # Enable USB stdio only
 pico_enable_stdio_uart(pio_bus_interface_rx_only_dma 0)
 pico_enable_stdio_usb(pio_bus_interface_rx_only_dma 1)
+
+# Phi2 tester
+
+add_executable(minimal_phi2_test minimal_phi2_test.c)
+target_include_directories(minimal_phi2_test PUBLIC
+    ${CMAKE_CURRENT_LIST_DIR}
+)
+
+target_link_libraries(minimal_phi2_test PUBLIC
+    pico_stdlib
+)
+
+pico_add_extra_outputs(minimal_phi2_test)
+
+# Enable USB stdio only
+pico_enable_stdio_uart(minimal_phi2_test 0)
+pico_enable_stdio_usb(minimal_phi2_test 1)
