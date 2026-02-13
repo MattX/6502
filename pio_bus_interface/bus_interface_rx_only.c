@@ -25,7 +25,7 @@ static int dma_rx_chan = -1;
 
 // DMA buffer (circular)
 #define DMA_BUFFER_SIZE 1024
-static uint32_t __attribute__((aligned(4096))) dma_rx_buffer[DMA_BUFFER_SIZE];
+static uint8_t __attribute__((aligned(DMA_BUFFER_SIZE))) dma_rx_buffer[DMA_BUFFER_SIZE];
 static volatile uint dma_rx_read_idx = 0;
 static uint32_t dma_rx_total_read = 0;
 
@@ -83,10 +83,10 @@ static void setup_dma(void) {
 
     // === RX DMA: PIO RX FIFO -> RAM buffer ===
     dma_channel_config rx_config = dma_channel_get_default_config(dma_rx_chan);
-    channel_config_set_transfer_data_size(&rx_config, DMA_SIZE_32);
+    channel_config_set_transfer_data_size(&rx_config, DMA_SIZE_8);
     channel_config_set_read_increment(&rx_config, false);
     channel_config_set_write_increment(&rx_config, true);
-    channel_config_set_ring(&rx_config, true, 10);  // Wrap at 1024 bytes
+    channel_config_set_ring(&rx_config, true, 10);  // Wrap at 1024 bytes (2^10)
     channel_config_set_dreq(&rx_config, pio_get_dreq(bus_pio, bus_sm, false));
 
     dma_channel_configure(
@@ -118,7 +118,7 @@ void bus_rx_only_task(void) {
 
 static inline uint get_dma_rx_write_idx(void) {
     uint32_t write_addr = dma_channel_hw_addr(dma_rx_chan)->write_addr;
-    return (write_addr - (uint32_t)dma_rx_buffer) / sizeof(uint32_t);
+    return write_addr - (uint32_t)dma_rx_buffer;
 }
 
 static inline uint32_t get_dma_rx_total_written(void) {
@@ -141,7 +141,7 @@ static void process_rx_data(void) {
     }
 
     while (dma_rx_read_idx != write_idx) {
-        uint8_t byte = dma_rx_buffer[dma_rx_read_idx] & 0xFF;
+        uint8_t byte = dma_rx_buffer[dma_rx_read_idx];
         dma_rx_read_idx = (dma_rx_read_idx + 1) % DMA_BUFFER_SIZE;
         dma_rx_total_read++;
         stats.rx_bytes++;
