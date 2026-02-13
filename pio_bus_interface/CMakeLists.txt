@@ -54,34 +54,6 @@ pico_enable_stdio_uart(pio_bus_interface 0)
 pico_enable_stdio_usb(pio_bus_interface 1)
 
 # ============================================================================
-# RX-Only Safe Test Version
-# MCU never drives the bus - just logs all CPU writes to USB serial
-# ============================================================================
-
-add_executable(pio_bus_interface_rx_only
-    main_rx_only.c
-)
-
-pico_generate_pio_header(pio_bus_interface_rx_only
-    ${CMAKE_CURRENT_LIST_DIR}/bus_interface_rx_only.pio)
-
-target_include_directories(pio_bus_interface_rx_only PUBLIC
-    ${CMAKE_CURRENT_LIST_DIR}
-)
-
-target_link_libraries(pio_bus_interface_rx_only PUBLIC
-    pico_stdlib
-    hardware_pio
-    hardware_gpio
-)
-
-pico_add_extra_outputs(pio_bus_interface_rx_only)
-
-# Enable USB stdio only
-pico_enable_stdio_uart(pio_bus_interface_rx_only 0)
-pico_enable_stdio_usb(pio_bus_interface_rx_only 1)
-
-# ============================================================================
 # RX-Only DMA + Parser Test Version
 # MCU never drives the bus - exercises DMA + protocol parser
 # ============================================================================

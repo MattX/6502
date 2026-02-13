@@ -221,8 +221,8 @@ void bus_rx_only_device_clear(uint8_t device) {
     device_rx_buffers[device].count = 0;
 }
 
-void bus_rx_only_get_stats(bus_rx_only_stats_t *s) {
-    *s = stats;
+bus_rx_only_stats_t bus_rx_only_get_stats(void) {
+    return stats;
 }
 
 void bus_rx_only_clear_stats(void) {
