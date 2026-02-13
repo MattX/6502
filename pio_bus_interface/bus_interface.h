@@ -3,6 +3,12 @@
  *
  * This driver manages the PIO state machine and DMA transfers for
  * bidirectional communication with a 6502 CPU.
+ *
+ * RX data is delivered via per-device callbacks when a complete write
+ * transaction is received.  The callback receives a pointer into the
+ * DMA ring buffer (or a contiguous copy when the data wraps).  Fast
+ * callbacks can process inline; slow ones should memcpy the data into
+ * their own structure before returning.
  */
 
 #ifndef BUS_INTERFACE_H
@@ -14,8 +20,16 @@
 // Maximum number of devices (channels)
 #define BUS_MAX_DEVICES     8
 
-// Maximum buffer size per device
+// Maximum TX buffer size per device
 #define BUS_MAX_BUFFER_SIZE 1024
+
+// RX callback: called when a complete write transaction is received.
+// |data| points into the DMA ring buffer and is only valid for the
+// duration of the callback.  Copy it if you need it to persist.
+typedef void (*bus_rx_callback_t)(uint8_t device, const uint8_t *data, uint16_t len);
+
+// Register a callback for a device (NULL to unregister)
+void bus_register_rx_callback(uint8_t device, bus_rx_callback_t callback);
 
 // Initialize the bus interface (PIO + DMA)
 // Returns true on success, false on failure
@@ -28,30 +42,23 @@ void bus_start(void);
 void bus_stop(void);
 
 // Process incoming/outgoing data (call regularly from main loop)
-// This handles the protocol layer and device buffer management
+// This handles the protocol layer and dispatches RX callbacks
 void bus_task(void);
-
-// Get the number of bytes available to read from a device
-uint16_t bus_device_rx_available(uint8_t device);
-
-// Read data from a device buffer
-// Returns number of bytes actually read
-uint16_t bus_device_read(uint8_t device, uint8_t *buffer, uint16_t max_len);
 
 // Write data to a device buffer (for CPU to read)
 // Returns number of bytes actually written
 uint16_t bus_device_write(uint8_t device, const uint8_t *data, uint16_t len);
 
-// Clear a device's buffers
+// Clear a device's TX buffer
 void bus_device_clear(uint8_t device);
 
 // Get statistics
 typedef struct {
-    uint32_t rx_bytes;      // Total bytes received from CPU
-    uint32_t tx_bytes;      // Total bytes sent to CPU
-    uint32_t rx_overflows;  // RX buffer overflow count
-    uint32_t rx_dma_overruns; // RX DMA ring overrun count
-    uint32_t tx_underflows; // TX FIFO underflow count (reads when empty)
+    uint32_t rx_bytes;          // Total bytes received from CPU
+    uint32_t tx_bytes;          // Total bytes sent to CPU
+    uint32_t rx_dma_overruns;   // DMA overruns (data lost before processing)
+    uint32_t rx_bankruptcies;   // DMA overruns during callback (data may be corrupt)
+    uint32_t tx_underflows;     // TX FIFO underflow count (reads when empty)
 } bus_stats_t;
 
 bus_stats_t bus_get_stats(void);
