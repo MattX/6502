@@ -25,8 +25,8 @@ static int dma_rx_chan = -1;
 static int dma_tx_chan = -1;
 
 // DMA buffers
-#define DMA_BUFFER_SIZE 256
-static uint32_t __attribute__((aligned(1024))) dma_rx_buffer[DMA_BUFFER_SIZE];
+#define DMA_BUFFER_SIZE 1024
+static uint32_t __attribute__((aligned(4096))) dma_rx_buffer[DMA_BUFFER_SIZE];
 static volatile uint dma_rx_read_idx = 0;
 static uint32_t dma_rx_total_read = 0;
 
@@ -318,8 +318,8 @@ void bus_device_clear(uint8_t device) {
     device_tx_buffers[device].count = 0;
 }
 
-void bus_get_stats(bus_stats_t *s) {
-    *s = stats;
+bus_stats_t bus_get_stats(void) {
+    return stats;
 }
 
 void bus_clear_stats(void) {

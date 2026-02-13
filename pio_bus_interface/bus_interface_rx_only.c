@@ -24,8 +24,8 @@ static uint bus_program_offset;
 static int dma_rx_chan = -1;
 
 // DMA buffer (circular)
-#define DMA_BUFFER_SIZE 256
-static uint32_t __attribute__((aligned(1024))) dma_rx_buffer[DMA_BUFFER_SIZE];
+#define DMA_BUFFER_SIZE 1024
+static uint32_t __attribute__((aligned(4096))) dma_rx_buffer[DMA_BUFFER_SIZE];
 static volatile uint dma_rx_read_idx = 0;
 static uint32_t dma_rx_total_read = 0;
 

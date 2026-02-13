@@ -41,8 +41,7 @@ static void loopback_task(void) {
 }
 
 static void print_stats(void) {
-    bus_stats_t stats;
-    bus_get_stats(&stats);
+    bus_stats_t stats = bus_get_stats();
 
     uint32_t rx_delta = stats.rx_bytes - last_stats.rx_bytes;
     uint32_t tx_delta = stats.tx_bytes - last_stats.tx_bytes;
