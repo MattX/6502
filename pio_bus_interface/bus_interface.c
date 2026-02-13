@@ -226,8 +226,6 @@ static void process_rx_data(void) {
 static void feed_tx_fifo(void) {
     // Check if a previous one-shot DMA has completed
     if (proto_state == PROTO_SENDING && !dma_channel_is_busy(dma_tx_chan)) {
-        // DMA finished - push sentinel to re-arm PIO
-        bus_pio->txf[bus_sm] = 0xFFFFFFFF;
         proto_state = PROTO_IDLE;
     }
 
