@@ -60,12 +60,9 @@ static void print_stats(void) {
 int main(void) {
     stdio_init_all();
 
-    sleep_ms(2000);  // Wait for USB enumeration
-
     printf("\n");
     printf("========================================\n");
     printf("  PIO Bus Interface - Loopback Test\n");
-    printf("  (Simplified Protocol, No A0)\n");
     printf("========================================\n");
     printf("Pin mapping:\n");
     printf("  GPIO 0:     RW\n");

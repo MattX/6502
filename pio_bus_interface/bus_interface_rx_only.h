@@ -13,7 +13,7 @@
 #include <stdbool.h>
 
 // Maximum number of devices (channels)
-#define BUS_RX_ONLY_MAX_DEVICES     256
+#define BUS_RX_ONLY_MAX_DEVICES     8
 
 // Maximum buffer size per device
 #define BUS_RX_ONLY_MAX_BUFFER_SIZE 256
@@ -47,7 +47,7 @@ typedef struct {
     uint32_t rx_read_requests; // Read requests observed (ignored)
 } bus_rx_only_stats_t;
 
-void bus_rx_only_get_stats(bus_rx_only_stats_t *stats);
+bus_rx_only_stats_t bus_rx_only_get_stats(void);
 void bus_rx_only_clear_stats(void);
 
 #endif // BUS_INTERFACE_RX_ONLY_H

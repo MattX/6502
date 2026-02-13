@@ -42,8 +42,6 @@ static void print_chunk(uint8_t device, const uint8_t *data, uint len) {
 int main(void) {
     stdio_init_all();
 
-    sleep_ms(2000);  // Wait for USB enumeration
-
     printf("\n");
     printf("====================================================\n");
     printf("  PIO Bus Interface - RX ONLY DMA (Safe Test)\n");
@@ -73,7 +71,7 @@ int main(void) {
     while (1) {
         bus_rx_only_task();
 
-        for (uint device = 0; device < 128; device++) {
+        for (uint device = 0; device < BUS_RX_ONLY_MAX_DEVICES; device++) {
             uint16_t available = bus_rx_only_device_available((uint8_t)device);
             if (available == 0) {
                 continue;
@@ -89,8 +87,7 @@ int main(void) {
 
         uint32_t now = to_ms_since_boot(get_absolute_time());
         if ((now - last_report_time) >= 5000) {
-            bus_rx_only_stats_t stats;
-            bus_rx_only_get_stats(&stats);
+            bus_rx_only_stats_t stats = bus_rx_only_get_stats();
             printf("\n[RX: %lu bytes, overflows: %lu, DMA overruns: %lu, read reqs: %lu]\n\n",
                    stats.rx_bytes,
                    stats.rx_overflows,
