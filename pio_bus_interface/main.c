@@ -22,21 +22,11 @@
 static uint32_t last_stats_time = 0;
 static bus_stats_t last_stats = {0};
 
-// Loopback: copy RX to TX for each device
-static void loopback_task(void) {
-    static uint8_t temp_buffer[BUS_MAX_BUFFER_SIZE];
-
-    for (int device = 0; device < BUS_MAX_DEVICES; device++) {
-        uint16_t available = bus_device_rx_available(device);
-        if (available > 0) {
-            uint16_t read = bus_device_read(device, temp_buffer, available);
-            if (read > 0) {
-                uint16_t written = bus_device_write(device, temp_buffer, read);
-                if (written < read) {
-                    printf("[Dev %d] TX full, dropped %d bytes\n", device, read - written);
-                }
-            }
-        }
+// Loopback callback: echo received data back to the same device
+static void loopback_callback(uint8_t device, const uint8_t *data, uint16_t len) {
+    uint16_t written = bus_device_write(device, data, len);
+    if (written < len) {
+        printf("[Dev %d] TX full, dropped %d bytes\n", device, len - written);
     }
 }
 
@@ -47,11 +37,13 @@ static void print_stats(void) {
     uint32_t tx_delta = stats.tx_bytes - last_stats.tx_bytes;
 
     if (rx_delta > 0 || tx_delta > 0 ||
-        stats.rx_overflows > last_stats.rx_overflows) {
-        printf("RX=%lu (+%lu) TX=%lu (+%lu) Overflows=%lu\n",
+        stats.rx_dma_overruns > last_stats.rx_dma_overruns ||
+        stats.rx_bankruptcies > last_stats.rx_bankruptcies) {
+        printf("RX=%lu (+%lu) TX=%lu (+%lu) Overruns=%lu Bankruptcies=%lu\n",
                stats.rx_bytes, rx_delta,
                stats.tx_bytes, tx_delta,
-               stats.rx_overflows);
+               stats.rx_dma_overruns,
+               stats.rx_bankruptcies);
     }
 
     last_stats = stats;
@@ -83,6 +75,11 @@ int main(void) {
         }
     }
 
+    // Register loopback callback for all devices
+    for (int i = 0; i < BUS_MAX_DEVICES; i++) {
+        bus_register_rx_callback(i, loopback_callback);
+    }
+
     bus_start();
     printf("Bus interface running.\n\n");
 
@@ -90,7 +87,6 @@ int main(void) {
 
     while (1) {
         bus_task();
-        loopback_task();
 
         uint32_t now = to_ms_since_boot(get_absolute_time());
         if (now - last_stats_time >= STATS_INTERVAL_MS) {
