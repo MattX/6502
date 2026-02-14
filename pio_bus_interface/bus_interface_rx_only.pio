@@ -30,7 +30,8 @@
 
 .wrap_target
 wait_cycle:
-    wait 1 gpio PIN_PHI2        ; 1 - Wait for PHI2 to go high
+    wait 1 gpio PIN_PHI2 [6]    ; 1 - Wait for PHI2 to go high,
+                                ; then wait 6 cycles (40ns) for the 6502's tMDS
 
     ; Read all pins: GPIO 0-29 into ISR (left shift: ISR[i] = GPIO[i])
     in pins, 30                 ; 2

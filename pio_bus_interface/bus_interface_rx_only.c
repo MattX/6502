@@ -6,8 +6,10 @@
  *   Read:  [device|0x80]                    (ignored in RX-only mode)
  *
  * RX data is dispatched to per-device callbacks directly from the DMA
- * ring buffer.  A post-callback transfer_count check detects the case
- * where DMA overwrites data while a callback is executing ("bankruptcy").
+ * ring buffer.  DMA runs in TRIGGER_SELF mode for endless operation;
+ * an epoch counter (maintained via DMA IRQ) tracks total bytes written
+ * for overrun detection.  A post-callback check detects the case where
+ * DMA overwrites data while a callback is executing ("bankruptcy").
  */
 
 #include "bus_interface_rx_only.h"
@@ -16,6 +18,7 @@
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
 #include "hardware/dma.h"
+#include "hardware/irq.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -28,12 +31,43 @@ static uint bus_program_offset;
 // DMA channel
 static int dma_rx_chan = -1;
 
-// DMA RX ring buffer - 4K gives callbacks plenty of headroom
-#define DMA_BUFFER_SIZE      4096
-#define DMA_BUFFER_RING_BITS 12    // 2^12 = 4096
+// DMA RX ring buffer
+#define DMA_BUFFER_SIZE      16384
+#define DMA_BUFFER_RING_BITS 12    // 2^14 = 16384
 static uint8_t __attribute__((aligned(DMA_BUFFER_SIZE))) dma_rx_buffer[DMA_BUFFER_SIZE];
 static volatile uint dma_rx_read_idx = 0;
 static uint32_t dma_rx_total_read = 0;
+
+/*
+ * RP2350 DMA TRANS_COUNT register layout (different from RP2040!):
+ *   Bits [31:28] = MODE   (4 bits)
+ *   Bits [27:0]  = COUNT  (28 bits, max 0x0FFFFFFF)
+ *
+ * MODE values:
+ *   0x0 = NORMAL       - count decrements, channel stops at 0
+ *   0x1 = TRIGGER_SELF - count decrements, channel re-triggers at 0
+ *   0xF = ENDLESS      - count NEVER decrements (runs forever)
+ *
+ * The old code wrote 0xFFFFFFFF which sets MODE=0xF (ENDLESS).  In ENDLESS
+ * mode the transfer_count register never changes, so our overrun detection
+ * formula (total_written = initial - remaining) always returned 0.  This
+ * caused dma_rx_total_read to drift ahead of total_written, wrapping the
+ * unsigned subtraction to a huge value and triggering false overruns on
+ * every poll.
+ *
+ * Fix: use TRIGGER_SELF mode (MODE=1) with COUNT=DMA_BUFFER_SIZE.  The DMA
+ * counts down each byte transfer and re-triggers itself at 0, running
+ * forever.  Each time it re-triggers, a DMA IRQ fires and we increment an
+ * epoch counter.  Total bytes written = epoch * DMA_BUFFER_SIZE + consumed,
+ * giving reliable overrun detection.
+ */
+#define DMA_TRANS_COUNT_MODE_TRIGGER_SELF (1u << 28)
+#define DMA_TRANS_COUNT_COUNT_MASK       0x0FFFFFFFu
+
+// Epoch counter: incremented by DMA IRQ each time the transfer count
+// wraps (every DMA_BUFFER_SIZE bytes).  Volatile because it's written
+// from the IRQ handler and read from the main loop.
+static volatile uint32_t dma_rx_epoch = 0;
 
 // Per-device RX callbacks
 static bus_rx_only_callback_t rx_callbacks[BUS_RX_ONLY_MAX_DEVICES];
@@ -63,6 +97,7 @@ static bus_rx_only_stats_t stats = {0};
 // Forward declarations
 static void setup_dma(void);
 static void process_rx_data(void);
+static void dma_rx_irq_handler(void);
 
 void bus_rx_only_register_callback(uint8_t device, bus_rx_only_callback_t callback) {
     if (device < BUS_RX_ONLY_MAX_DEVICES) {
@@ -90,10 +125,9 @@ bool bus_rx_only_init(void) {
 }
 
 static void setup_dma(void) {
-    // Claim DMA channel
     dma_rx_chan = dma_claim_unused_channel(true);
 
-    // === RX DMA: PIO RX FIFO -> RAM buffer ===
+    // === RX DMA: PIO RX FIFO -> RAM ring buffer ===
     dma_channel_config rx_config = dma_channel_get_default_config(dma_rx_chan);
     channel_config_set_transfer_data_size(&rx_config, DMA_SIZE_8);
     channel_config_set_read_increment(&rx_config, false);
@@ -101,17 +135,37 @@ static void setup_dma(void) {
     channel_config_set_ring(&rx_config, true, DMA_BUFFER_RING_BITS);
     channel_config_set_dreq(&rx_config, pio_get_dreq(bus_pio, bus_sm, false));
 
+    // Use TRIGGER_SELF mode: DMA counts down DMA_BUFFER_SIZE transfers,
+    // then re-triggers itself (endless operation).  Each re-trigger fires
+    // an IRQ so we can track total bytes via an epoch counter.
+    uint32_t trans_count = DMA_BUFFER_SIZE | DMA_TRANS_COUNT_MODE_TRIGGER_SELF;
+
     dma_channel_configure(
         dma_rx_chan,
         &rx_config,
         dma_rx_buffer,
         &bus_pio->rxf[bus_sm],
-        0xFFFFFFFF,
+        trans_count,
         false
     );
 
+    // DMA IRQ: fires each time transfer count reaches 0 (every
+    // DMA_BUFFER_SIZE bytes).  We use this to maintain the epoch counter
+    // for total-bytes-written tracking.
+    dma_channel_set_irq0_enabled(dma_rx_chan, true);
+    irq_set_exclusive_handler(DMA_IRQ_0, dma_rx_irq_handler);
+    irq_set_enabled(DMA_IRQ_0, true);
+
+    dma_rx_epoch = 0;
     dma_rx_read_idx = 0;
     dma_rx_total_read = 0;
+}
+
+// DMA IRQ handler: called each time the transfer count reaches 0 and the
+// channel re-triggers.  This happens every DMA_BUFFER_SIZE bytes.
+static void __isr dma_rx_irq_handler(void) {
+    dma_channel_acknowledge_irq0(dma_rx_chan);
+    dma_rx_epoch++;
 }
 
 void bus_rx_only_start(void) {
@@ -122,6 +176,7 @@ void bus_rx_only_start(void) {
 void bus_rx_only_stop(void) {
     bus_interface_rx_only_disable(bus_pio, bus_sm);
     dma_channel_abort(dma_rx_chan);
+    dma_channel_set_irq0_enabled(dma_rx_chan, false);
 }
 
 void bus_rx_only_task(void) {
@@ -133,9 +188,23 @@ static inline uint get_dma_rx_write_idx(void) {
     return write_addr - (uint32_t)dma_rx_buffer;
 }
 
+// Compute total bytes written by DMA since start.
+//
+// With TRIGGER_SELF mode, the DMA counts down from DMA_BUFFER_SIZE and
+// re-triggers at 0.  The epoch counter (incremented by IRQ) tracks how
+// many full rounds have completed.  We read epoch and remaining count
+// with a consistency check to handle the race where the IRQ fires
+// between the two reads.
 static inline uint32_t get_dma_rx_total_written(void) {
-    uint32_t remaining = dma_channel_hw_addr(dma_rx_chan)->transfer_count;
-    return 0xFFFFFFFFu - remaining;
+    uint32_t epoch, remaining;
+    do {
+        epoch = dma_rx_epoch;
+        __compiler_memory_barrier();  // ensure epoch is read before transfer_count
+        remaining = dma_channel_hw_addr(dma_rx_chan)->transfer_count
+                    & DMA_TRANS_COUNT_COUNT_MASK;
+        __compiler_memory_barrier();
+    } while (epoch != dma_rx_epoch);
+    return epoch * DMA_BUFFER_SIZE + (DMA_BUFFER_SIZE - remaining);
 }
 
 // Dispatch the completed RX transaction to the device callback.
@@ -158,6 +227,7 @@ static bool dispatch_rx_callback(void) {
         data = rx_transaction_buf;
     }
 
+    stats.rx_dispatched++;
     cb(current_device, data, rx_transaction_len);
 
     // Post-callback overrun check
@@ -200,7 +270,8 @@ static void process_rx_data(void) {
                 // First byte: device number (bit 7 = read flag)
                 current_device = byte & 0x7F;
                 if (current_device >= BUS_RX_ONLY_MAX_DEVICES) {
-                    // Invalid device - discard and stay idle
+                    printf("Invalid device %d\n", current_device);
+                    stats.rx_invalid_device++;
                     break;
                 }
                 if (byte & 0x80) {
@@ -245,4 +316,8 @@ bus_rx_only_stats_t bus_rx_only_get_stats(void) {
 
 void bus_rx_only_clear_stats(void) {
     memset(&stats, 0, sizeof(stats));
+}
+
+const uint8_t *bus_rx_only_get_dma_buffer(void) {
+    return dma_rx_buffer;
 }

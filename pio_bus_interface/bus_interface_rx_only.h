@@ -36,13 +36,18 @@ void bus_rx_only_task(void);
 
 // Get statistics
 typedef struct {
-    uint32_t rx_bytes;         // Total bytes received from CPU
-    uint32_t rx_dma_overruns;  // DMA overruns (data lost before processing)
-    uint32_t rx_bankruptcies;  // DMA overruns during callback (data may be corrupt)
-    uint32_t rx_read_requests; // Read requests observed (ignored)
+    uint32_t rx_bytes;           // Total bytes received from CPU
+    uint32_t rx_dma_overruns;    // DMA overruns (data lost before processing)
+    uint32_t rx_bankruptcies;    // DMA overruns during callback (data may be corrupt)
+    uint32_t rx_read_requests;   // Read requests observed (ignored)
+    uint32_t rx_invalid_device;  // Bytes discarded (device ID >= MAX_DEVICES)
+    uint32_t rx_dispatched;      // Successful transaction dispatches
 } bus_rx_only_stats_t;
 
 bus_rx_only_stats_t bus_rx_only_get_stats(void);
 void bus_rx_only_clear_stats(void);
+
+// Debug: direct access to DMA ring buffer for raw byte inspection
+const uint8_t *bus_rx_only_get_dma_buffer(void);
 
 #endif // BUS_INTERFACE_RX_ONLY_H

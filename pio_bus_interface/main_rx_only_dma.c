@@ -14,38 +14,29 @@
 
 #include "bus_interface_rx_only.h"
 
-// Line buffer for ASCII display
-#define LINE_WIDTH 16
-
-static void print_chunk(const uint8_t *data, uint len) {
-    for (uint i = 0; i < LINE_WIDTH; i++) {
-        if (i < len) {
-            printf("%02X ", data[i]);
-        } else {
-            printf("   ");
+static void callback(uint8_t device, const uint8_t *data, uint16_t len) {
+    if (device != 0) {
+        printf("Expected device 0, got %d", device);
+    }
+    static char last_pattern = 1;
+    char pattern = last_pattern - 1;
+    if (pattern == 0) {
+        pattern = 255;
+    }
+    if (len != pattern) {
+        printf("Expected length %d next, got %d\n", pattern, len);
+        pattern = len;
+    } else {
+        for (uint16_t i = 0; i < len; i++) {
+            if (data[i] != pattern) {
+                printf("Intruder found in pattern %d[%d]: %d\n", pattern, i, data[i]);
+                goto end;
+            }
         }
-        if (i == 7) {
-            printf(" ");
-        }
     }
 
-    printf(" |");
-    for (uint i = 0; i < len; i++) {
-        char c = (char)data[i];
-        printf("%c", isprint(c) ? c : '.');
-    }
-    printf("|\n");
-}
-
-// RX callback: hex-dump received data
-static void hexdump_callback(uint8_t device, const uint8_t *data, uint16_t len) {
-    uint16_t offset = 0;
-    while (offset < len) {
-        uint16_t chunk = (len - offset > LINE_WIDTH) ? LINE_WIDTH : len - offset;
-        printf("DEV %02X: ", device);
-        print_chunk(data + offset, chunk);
-        offset += chunk;
-    }
+end:
+    last_pattern = pattern;
 }
 
 int main(void) {
@@ -76,7 +67,7 @@ int main(void) {
 
     // Register hex-dump callback for all devices
     for (int i = 0; i < BUS_RX_ONLY_MAX_DEVICES; i++) {
-        bus_rx_only_register_callback(i, hexdump_callback);
+        bus_rx_only_register_callback(i, callback);
     }
 
     bus_rx_only_start();
@@ -89,11 +80,14 @@ int main(void) {
         uint32_t now = to_ms_since_boot(get_absolute_time());
         if ((now - last_report_time) >= 5000) {
             bus_rx_only_stats_t stats = bus_rx_only_get_stats();
-            printf("\n[RX: %lu bytes, DMA overruns: %lu, bankruptcies: %lu, read reqs: %lu]\n\n",
+            printf("\n[RX: %lu bytes, DMA overruns: %lu, bankruptcies: %lu, "
+                   "read reqs: %lu, invalid dev: %lu, dispatched: %lu]\n\n",
                    stats.rx_bytes,
                    stats.rx_dma_overruns,
                    stats.rx_bankruptcies,
-                   stats.rx_read_requests);
+                   stats.rx_read_requests,
+                   stats.rx_invalid_device,
+                   stats.rx_dispatched);
             last_report_time = now;
         }
     }
