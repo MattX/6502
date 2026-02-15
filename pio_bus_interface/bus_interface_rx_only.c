@@ -32,8 +32,8 @@ static uint bus_program_offset;
 static int dma_rx_chan = -1;
 
 // DMA RX ring buffer
-#define DMA_BUFFER_SIZE      16384
-#define DMA_BUFFER_RING_BITS 12    // 2^14 = 16384
+#define DMA_BUFFER_RING_BITS 15    // 2^15 = 32768
+#define DMA_BUFFER_SIZE      (1 << DMA_BUFFER_RING_BITS)
 static uint8_t __attribute__((aligned(DMA_BUFFER_SIZE))) dma_rx_buffer[DMA_BUFFER_SIZE];
 static volatile uint dma_rx_read_idx = 0;
 static uint32_t dma_rx_total_read = 0;
@@ -134,6 +134,7 @@ static void setup_dma(void) {
     channel_config_set_write_increment(&rx_config, true);
     channel_config_set_ring(&rx_config, true, DMA_BUFFER_RING_BITS);
     channel_config_set_dreq(&rx_config, pio_get_dreq(bus_pio, bus_sm, false));
+    channel_config_set_high_priority(&rx_config, true);
 
     // Use TRIGGER_SELF mode: DMA counts down DMA_BUFFER_SIZE transfers,
     // then re-triggers itself (endless operation).  Each re-trigger fires
@@ -195,6 +196,13 @@ static inline uint get_dma_rx_write_idx(void) {
 // many full rounds have completed.  We read epoch and remaining count
 // with a consistency check to handle the race where the IRQ fires
 // between the two reads.
+//
+// There is a second, subtler race: when the DMA re-triggers (hardware,
+// instantaneous) the transfer_count resets to DMA_BUFFER_SIZE, but the
+// epoch IRQ hasn't fired yet (~80ns latency).  If we read during this
+// window, we get the OLD epoch with the NEW (reset) count, making
+// total_written appear DMA_BUFFER_SIZE too low.  We detect this because
+// total_written must never be less than dma_rx_total_read.
 static inline uint32_t get_dma_rx_total_written(void) {
     uint32_t epoch, remaining;
     do {
@@ -204,7 +212,11 @@ static inline uint32_t get_dma_rx_total_written(void) {
                     & DMA_TRANS_COUNT_COUNT_MASK;
         __compiler_memory_barrier();
     } while (epoch != dma_rx_epoch);
-    return epoch * DMA_BUFFER_SIZE + (DMA_BUFFER_SIZE - remaining);
+    uint32_t total = epoch * DMA_BUFFER_SIZE + (DMA_BUFFER_SIZE - remaining);
+    if ((int32_t)(total - dma_rx_total_read) < 0) {
+        total += DMA_BUFFER_SIZE;
+    }
+    return total;
 }
 
 // Dispatch the completed RX transaction to the device callback.
@@ -270,7 +282,7 @@ static void process_rx_data(void) {
                 // First byte: device number (bit 7 = read flag)
                 current_device = byte & 0x7F;
                 if (current_device >= BUS_RX_ONLY_MAX_DEVICES) {
-                    printf("Invalid device %d\n", current_device);
+                    // printf("Inv %x\n", current_device);
                     stats.rx_invalid_device++;
                     break;
                 }

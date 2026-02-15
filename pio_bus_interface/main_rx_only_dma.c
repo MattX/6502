@@ -16,23 +16,26 @@
 
 static void callback(uint8_t device, const uint8_t *data, uint16_t len) {
     if (device != 0) {
-        printf("Expected device 0, got %d", device);
+        // printf("Expected device 0, got %d", device);
     }
-    static char last_pattern = 1;
-    char pattern = last_pattern - 1;
+    static uint8_t last_pattern = 1;
+    uint8_t pattern = last_pattern - 1;
     if (pattern == 0) {
         pattern = 255;
     }
     if (len != pattern) {
-        printf("Expected length %d next, got %d\n", pattern, len);
+        // printf("Expected length %d next, got %d\n", pattern, len);
         pattern = len;
     } else {
         for (uint16_t i = 0; i < len; i++) {
             if (data[i] != pattern) {
-                printf("Intruder found in pattern %d[%d]: %d\n", pattern, i, data[i]);
+                // printf("Intruder found in pattern %d[%d]: %d\n", pattern, i, data[i]);
                 goto end;
             }
         }
+    }
+    if (len == 1) {
+        printf("End iteration\n");
     }
 
 end:
