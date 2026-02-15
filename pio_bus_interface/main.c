@@ -51,6 +51,7 @@ static void print_stats(void) {
 
 int main(void) {
     stdio_init_all();
+    sleep_ms(2000);  // let USB settle
 
     printf("\n");
     printf("========================================\n");

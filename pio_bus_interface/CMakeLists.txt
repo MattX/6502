@@ -6,6 +6,7 @@ set(PICO_SDK_PATH ${CMAKE_CURRENT_LIST_DIR}/../pico-sdk)
 # Target RP2350 (Pico 2)
 set(PICO_BOARD pico2)
 set(PICO_PLATFORM rp2350)
+set(PICO_TOOLCHAIN_PATH /opt/homebrew/Cellar/arm-gcc-bin@10/10.3-2021.10_1/)
 
 # Pull in SDK (must be before project)
 include(pico_sdk_import.cmake)

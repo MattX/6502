@@ -48,17 +48,14 @@ static uint32_t dma_rx_total_read = 0;
  *   0x1 = TRIGGER_SELF - count decrements, channel re-triggers at 0
  *   0xF = ENDLESS      - count NEVER decrements (runs forever)
  *
- * The old code wrote 0xFFFFFFFF which sets MODE=0xF (ENDLESS).  In ENDLESS
- * mode the transfer_count register never changes, so our overrun detection
- * formula (total_written = initial - remaining) always returned 0.  This
- * caused dma_rx_total_read to drift ahead of total_written, wrapping the
- * unsigned subtraction to a huge value and triggering false overruns on
- * every poll.
+ * IMPORTANT: do NOT use ENDLESS mode (e.g. trans_count = 0xFFFFFFFF).
+ * In ENDLESS mode transfer_count never changes, making it impossible to
+ * track how many bytes DMA has written - which breaks overrun detection.
  *
- * Fix: use TRIGGER_SELF mode (MODE=1) with COUNT=DMA_BUFFER_SIZE.  The DMA
+ * We use TRIGGER_SELF mode (MODE=1) with COUNT=DMA_BUFFER_SIZE.  DMA
  * counts down each byte transfer and re-triggers itself at 0, running
- * forever.  Each time it re-triggers, a DMA IRQ fires and we increment an
- * epoch counter.  Total bytes written = epoch * DMA_BUFFER_SIZE + consumed,
+ * forever.  Each re-trigger fires a DMA IRQ that increments an epoch
+ * counter.  Total bytes written = epoch * DMA_BUFFER_SIZE + consumed,
  * giving reliable overrun detection.
  */
 #define DMA_TRANS_COUNT_MODE_TRIGGER_SELF (1u << 28)
@@ -191,18 +188,20 @@ static inline uint get_dma_rx_write_idx(void) {
 
 // Compute total bytes written by DMA since start.
 //
-// With TRIGGER_SELF mode, the DMA counts down from DMA_BUFFER_SIZE and
-// re-triggers at 0.  The epoch counter (incremented by IRQ) tracks how
-// many full rounds have completed.  We read epoch and remaining count
-// with a consistency check to handle the race where the IRQ fires
-// between the two reads.
+// total = epoch * DMA_BUFFER_SIZE + (DMA_BUFFER_SIZE - remaining)
 //
-// There is a second, subtler race: when the DMA re-triggers (hardware,
-// instantaneous) the transfer_count resets to DMA_BUFFER_SIZE, but the
-// epoch IRQ hasn't fired yet (~80ns latency).  If we read during this
-// window, we get the OLD epoch with the NEW (reset) count, making
-// total_written appear DMA_BUFFER_SIZE too low.  We detect this because
-// total_written must never be less than dma_rx_total_read.
+// Two race conditions to handle:
+//
+// 1) Epoch/count tear: the IRQ fires between reading epoch and
+//    transfer_count, giving inconsistent values.  Solved by re-reading
+//    epoch after transfer_count and retrying if it changed.
+//
+// 2) Re-trigger latency: when DMA re-triggers, transfer_count resets
+//    to DMA_BUFFER_SIZE instantly (hardware), but the epoch IRQ hasn't
+//    fired yet (~80ns latency).  Reading during this window gives the
+//    OLD epoch with the NEW (reset) count, making total appear one
+//    DMA_BUFFER_SIZE too low.  Detected because total must never be
+//    less than dma_rx_total_read; corrected by adding DMA_BUFFER_SIZE.
 static inline uint32_t get_dma_rx_total_written(void) {
     uint32_t epoch, remaining;
     do {
