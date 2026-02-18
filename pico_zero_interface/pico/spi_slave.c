@@ -66,9 +66,9 @@ static uint8_t tx_buf[SPI_SLAVE_READ_SIZE];
 // device/length framing). tx_queue_len tracks total queued bytes.
 #define TX_QUEUE_SIZE 4096
 static uint8_t tx_queue[TX_QUEUE_SIZE];
-static volatile uint tx_queue_head = 0;  // Next byte to read
-static volatile uint tx_queue_tail = 0;  // Next byte to write
-static volatile uint tx_queue_len = 0;   // Bytes in queue
+static uint tx_queue_head = 0;  // Next byte to read
+static uint tx_queue_tail = 0;  // Next byte to write
+static uint tx_queue_len = 0;   // Bytes in queue
 
 // Protocol state
 typedef enum {
@@ -119,11 +119,6 @@ uint8_t spi_slave_get_buf(void) {
     return (buf > 0xFF) ? 0xFF : (uint8_t)buf;
 }
 
-// How many bytes are available in the TX queue
-static inline uint tx_queue_available(void) {
-    return tx_queue_len;
-}
-
 // Drain up to max_bytes from tx_queue into dst. Returns bytes copied.
 static uint tx_queue_drain(uint8_t *dst, uint max_bytes) {
     uint to_copy = tx_queue_len;
@@ -133,7 +128,7 @@ static uint tx_queue_drain(uint8_t *dst, uint max_bytes) {
     uint head = tx_queue_head;
     for (uint i = 0; i < to_copy; i++) {
         dst[i] = tx_queue[head];
-        head = (head + 1) % TX_QUEUE_SIZE;
+        head = (head + 1) & (TX_QUEUE_SIZE - 1);
     }
     tx_queue_head = head;
     tx_queue_len -= to_copy;
@@ -366,7 +361,7 @@ bool spi_slave_tx_queue(const uint8_t *data, uint16_t len) {
     uint tail = tx_queue_tail;
     for (uint16_t i = 0; i < len; i++) {
         tx_queue[tail] = data[i];
-        tail = (tail + 1) % TX_QUEUE_SIZE;
+        tail = (tail + 1) & (TX_QUEUE_SIZE - 1);
     }
     tx_queue_tail = tail;
     tx_queue_len += len;

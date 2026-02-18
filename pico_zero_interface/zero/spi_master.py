@@ -125,7 +125,7 @@ class SpiMaster:
             return False
 
         # Check local buffer estimate
-        buf_needed = (len(payload) + 63) // 64  # Round up to 64-byte units
+        buf_needed = (len(payload) + 3 + 63) // 64  # Round up to 64-byte units (incl. header)
         if buf_needed > self.buf:
             return False
 
@@ -185,14 +185,7 @@ class SpiMaster:
         if self._irq_is_asserted():
             return True
 
-        # Wait for falling edge event
-        timeout_ns = None
-        if timeout_s is not None:
-            timeout_ns = int(timeout_s * 1e9)
-            if timeout_ns <= 0:
-                return False
-
-        # gpiod v2: wait_edge_events takes timeout as timedelta or seconds
+        # gpiod v2: wait_edge_events takes timeout as timedelta
         if self._gpio.wait_edge_events(
             datetime.timedelta(seconds=timeout_s) if timeout_s else None
         ):
