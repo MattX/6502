@@ -5,13 +5,13 @@ document describes the SPI-based protocol between the Pico and Zero.
 
 ## Why SPI?
 
-| Option | Max practical throughput | Bidirectional | Linux support | Notes |
-|--------|------------------------|---------------|---------------|-------|
-| **SPI** | **~1-2 MB/s** | **Full-duplex** | **Excellent (master)** | **Best fit** |
-| UART | ~300 KB/s (3 Mbps) | Full-duplex | Good | Too slow |
-| I2C | ~125 KB/s (1 MHz FM) | Half-duplex | Good | Way too slow |
-| USB | High | Complex | Complex | Reserved for other use |
-| WiFi | High | Full-duplex | Good | Wired requirement |
+| Option  | Max practical throughput | Bidirectional  | Linux support          | Notes              |
+|---------|-------------------------|----------------|------------------------|--------------------|
+| **SPI** | **~1-2 MB/s**           | **Full-duplex** | **Excellent (master)** | **Best fit**       |
+| UART    | ~300 KB/s (3 Mbps)      | Full-duplex    | Good                   | Too slow           |
+| I2C     | ~125 KB/s (1 MHz FM)    | Half-duplex    | Good                   | Way too slow       |
+| USB     | High                    | Complex        | Complex                | Reserved for other use |
+| WiFi    | High                    | Full-duplex    | Good                   | Wired requirement  |
 
 SPI wins because:
 
@@ -34,8 +34,8 @@ SPI wins because:
   GPIO 10 (MOSI)  ----------> SPI RX
   GPIO  9 (MISO)  <---------- SPI TX
   GPIO  8 (CE0)   ----------> SPI CSn
-  GPIO 25         <---------- IRQ (active low)
-  GPIO 24         <---------- READY (active high)
+  GPIO 25         <---------- IRQ   (active low, "I have data")
+  GPIO 24         <---------- READY (active low, "TX DMA loaded, safe to READ")
   GND             ----------- GND
 ```
 
@@ -47,14 +47,26 @@ can be assigned to `spi0` or `spi1` on the RP2350.
 
 ### Signal Descriptions
 
-| Signal | Direction | Description |
-|--------|-----------|-------------|
-| SCLK | Zero -> Pico | SPI clock, 10 MHz default |
-| MOSI | Zero -> Pico | Master Out, Slave In |
-| MISO | Pico -> Zero | Master In, Slave Out |
-| CSn | Zero -> Pico | Chip select, active low. One SPI transaction per CS assertion. |
-| IRQ | Pico -> Zero | Pico asserts (drives low) when it has data for Zero to read. Directly wired to a Zero GPIO configured with edge interrupt. |
-| READY | Pico -> Zero | Pico drives high when it can accept data. Deasserted (low) = backpressure, Zero must not send WRITE commands. |
+| Signal | Direction    | Description |
+|--------|-------------|-------------|
+| SCLK   | Zero -> Pico | SPI clock, 10 MHz default |
+| MOSI   | Zero -> Pico | Master Out, Slave In |
+| MISO   | Pico -> Zero | Master In, Slave Out |
+| CSn    | Zero -> Pico | Chip select, active low. One SPI transaction per CS assertion. |
+| IRQ    | Pico -> Zero | Advisory: Pico asserts (drives low) when it has data for Zero to read. The Zero should respond by sending a REQUEST. |
+| READY  | Pico -> Zero | Synchronization: Pico asserts (drives low) after loading TX DMA in response to a REQUEST. The Zero must wait for READY before sending a READ. |
+
+### SPI Mode
+
+Use **Motorola SPI, Mode 0** (CPOL=0, CPHA=0):
+
+* Clock idles low.
+* Data sampled on rising edge, changed on falling edge.
+* CS is active low.
+
+This is the default on both the BCM2835 and RP2350, and what the vast majority
+of SPI devices use. The other SPI "standards" (TI SSI, Microwire) are entirely
+different protocols and are not relevant here.
 
 ### Electrical
 
@@ -71,77 +83,128 @@ series termination resistors (33 ohm) on SCLK and MOSI if the connection is long
   mature, while SPI slave support barely exists.
 * **Pi Pico = SPI Slave.** It responds to transactions initiated by the Zero.
   The RP2350's hardware SPI peripheral supports slave mode with DMA natively.
-* **Pico initiates via IRQ.** When the Pico has data to send (received from the
-  6502), it asserts the IRQ line. The Zero's IRQ handler then initiates a READ
-  transaction to retrieve it.
+* **Bidirectional initiation.** When the Pico has data to send, it asserts IRQ.
+  The Zero responds with a REQUEST/READ handshake to retrieve it.
 
-### Transaction Format
+### The Core Problem: SPI Slave TX Timing
 
-Every SPI transaction begins with a **4-byte header** exchanged simultaneously
-(full-duplex), optionally followed by a **payload**.
+In SPI slave mode, the TX FIFO must be loaded **before** the master starts
+clocking. The slave cannot react to an incoming transaction and prepare a
+response mid-transfer. The PL022 has no "default TX byte" register -- if the
+TX FIFO is empty when the master clocks, the output is undefined.
 
-```
-CS asserted ──────────────────────────────────────────── CS deasserted
-             [---- Header (4 bytes) ----] [-- Payload (0..N bytes) --]
-  MOSI:      [CMD] [LEN_HI] [LEN_LO] [SEQ]  [data bytes...]
-  MISO:      [STS] [AVL_HI] [AVL_LO] [BUF]  [data bytes...]
-```
+The master can start a transaction at any time. This means the slave cannot
+safely set up TX DMA at arbitrary moments -- the master might start clocking
+in the middle of the DMA configuration, producing corrupt output.
 
-The header bytes are exchanged simultaneously on MOSI/MISO, so each side sends
-and receives header information in a single 4-byte exchange.
+**The REQUEST/READY handshake solves this.** When the master sends a REQUEST,
+it promises not to start another transaction until READY is asserted. This
+gives the slave a guaranteed window to configure TX DMA without any race
+condition. Once READY is asserted, the TX DMA is stable and the master can
+safely clock out the response.
 
-#### Header: Zero -> Pico (MOSI)
+For WRITEs, this problem doesn't exist -- MISO is ignored.
 
-| Byte | Name | Description |
-|------|------|-------------|
-| 0 | CMD | Command byte (see below) |
-| 1-2 | LEN | Payload length in bytes (big-endian). For WRITE: number of bytes that follow. For READ: max bytes Zero is willing to accept. For STATUS: 0. |
-| 3 | SEQ | Sequence number (0-255, wrapping). Incremented per transaction. Used to detect dropped/duplicate transactions. |
+### Constants
 
-#### Header: Pico -> Zero (MISO)
+| Name        | Value | Description |
+|-------------|-------|-------------|
+| `READ_SIZE` | 1503  | Fixed transfer size for READ transactions (3-byte header + 1500-byte payload). Payload matches Ethernet MTU so a full network packet fits in one READ. Both sides must agree on this value. |
 
-| Byte | Name | Description |
-|------|------|-------------|
-| 0 | STS | Status flags (see below) |
-| 1-2 | AVL | Bytes available to read from Pico (big-endian). If CMD is READ, the actual transfer length is `min(LEN, AVL)`. |
-| 3 | BUF | Free buffer space on Pico, in units of 64 bytes. 0xFF = 16 KB+ free. 0x00 = full. |
+### Transaction Types
 
-#### Commands (CMD byte)
+#### WRITE (Zero -> Pico)
 
-| Value | Name | Payload direction | Description |
-|-------|------|-------------------|-------------|
-| 0x00 | STATUS | None | Poll Pico status. No payload follows; just exchange headers. |
-| 0x01 | WRITE | MOSI (Zero -> Pico) | Zero sends LEN bytes of payload to Pico. |
-| 0x02 | READ | MISO (Pico -> Zero) | Zero clocks out `min(LEN, AVL)` bytes. Zero sends dummy 0x00 on MOSI. |
-
-#### Status Flags (STS byte)
-
-| Bit | Name | Description |
-|-----|------|-------------|
-| 0 | DATA_AVAIL | 1 = Pico has data to send (mirrors IRQ pin state) |
-| 1 | BUSY | 1 = Pico is processing a previous transaction, retry later |
-| 2 | OVERRUN | 1 = Pico's RX buffer overflowed since last STATUS read (sticky, cleared on read) |
-| 3 | PROTO_ERR | 1 = Pico detected a protocol error (bad CMD, length mismatch, etc.) |
-| 7-4 | | Reserved (0) |
-
-### Payload Framing: Messages
-
-The payload carries **messages** between Zero and Pico. Each message corresponds
-to a 6502 bus transaction (a write to or read from a virtual device). Messages
-are framed identically to the 6502-side protocol:
+Single SPI transaction. MISO is ignored.
 
 ```
-[DEVICE] [LENGTH] [DATA ...]
+CS low ─────────────────────────────────────── CS high
+  MOSI: [0x01] [LEN_HI] [LEN_LO] [payload...]
+  MISO: (don't care)
 ```
 
-* `DEVICE`: 0-127 for data heading toward the 6502 (Zero->Pico->6502),
-  or `DEVICE | 0x80` for data originating from the 6502 (6502->Pico->Zero).
-* `LENGTH`: 1-255 bytes of data following.
-* `DATA`: The message payload.
+* `LEN` (big-endian uint16): number of payload bytes following the 3-byte header.
+* The Pico's RX DMA writes the entire transaction (header + payload) into a ring
+  buffer. Software parses messages after CS goes high.
+* Zero should only send a WRITE if it believes the Pico has enough buffer space
+  (tracked via the BUF field from the most recent READ response).
 
-A single SPI WRITE or READ payload may contain **multiple concatenated messages**
-to amortize SPI transaction overhead. The receiver parses them sequentially
-using the length field.
+#### REQUEST (Zero -> Pico)
+
+Single 1-byte SPI transaction. Asks the Pico to prepare a response.
+
+```
+CS low ──── CS high
+  MOSI: [0x02]
+  MISO: (don't care)
+```
+
+After CS goes high, the **master must not start any SPI transaction** until
+READY is asserted by the Pico. The next transaction must be a READ.
+
+The Pico handles the REQUEST by:
+1. Preparing a `READ_SIZE`-byte response buffer with current data (if any)
+   and status information.
+2. Configuring SPI TX DMA to send from that buffer.
+3. Asserting READY (driving low).
+
+#### READ (Zero -> Pico, after READY)
+
+Single SPI transaction of exactly `READ_SIZE` bytes. Only sent **after
+READY is asserted** (in response to a prior REQUEST).
+
+```
+CS low ──────────────────────────────────────────────── CS high
+  MOSI: [0x03] [0x00 x1502]                   (READ_SIZE = 1503 bytes)
+  MISO: [LEN_HI] [LEN_LO] [BUF] [payload ... zero-padded]
+        |<-- simultaneous full-duplex, READ_SIZE bytes ->|
+```
+
+SPI is full-duplex: while the master sends `[0x03]` + dummy bytes, it
+simultaneously receives the Pico's pre-loaded response from byte 0. No
+negotiation needed -- both sides know the transfer is exactly `READ_SIZE`
+bytes.
+
+* `LEN` (big-endian uint16): actual valid payload bytes (0 = no data, just
+  status). The Zero reads LEN bytes of payload; the rest is zero-padding.
+* `BUF`: free RX buffer space on Pico, in 64-byte units (0xFF = 16 KB+ free,
+  0x00 = full). Zero uses this to decide how much it can WRITE next.
+
+After CS goes high, the Pico deasserts READY. The Zero must observe READY
+going high before sending a new REQUEST.
+
+### Startup Sequence
+
+The Pico boots faster than the Zero (bare-metal vs Linux). The startup
+handshake ensures the Zero doesn't send transactions before the Pico is ready:
+
+1. Pico boots, initializes SPI slave and DMA, asserts IRQ.
+2. Zero boots, starts SPI master, waits for IRQ low.
+3. Zero sees IRQ, sends REQUEST/READ.
+4. Pico responds with `LEN=0, BUF=current`. Both sides are now synchronized.
+5. Normal operation begins.
+
+This also handles **Pico reboots**: the Zero sees a new IRQ falling edge
+and can re-sync with a REQUEST/READ.
+
+```
+Zero                                    Pico
+  |                                       |
+  |                       Pico boots, inits SPI slave
+  |                       Pico asserts IRQ
+  |                                       |
+  |  Zero boots (Linux)                   |
+  |  Zero waits for IRQ...                |
+  |                                       |
+  |<-- IRQ (low) -------------------------|
+  |                                       |
+  |=== REQUEST ===========================>
+  |=== (wait READY) ==== READ ============>
+  | MISO: [0x00][0x00][BUF][0x00 ...]    |
+  |=== CS high ===========================>
+  |                                       |
+  |  Synchronized. Normal operation.      |
+```
 
 ### Transaction Flows
 
@@ -150,74 +213,113 @@ using the length field.
 ```
 Zero                                    Pico
   |                                       |
-  |--- check READY pin is high ---------->|
+  |  (check last-known BUF >= payload)    |
   |                                       |
   |=== SPI transaction (CS low) ==========>
-  | MOSI: [CMD=WRITE][LEN=N][SEQ]        |
-  | MISO: [STS][AVL][BUF]                |  <-- Zero can note AVL for later
-  | MOSI: [payload, N bytes]             |
-  | MISO: (ignored)                      |
+  | MOSI: [0x01][LEN_HI][LEN_LO]         |
+  | MOSI: [payload, LEN bytes]            |
+  | MISO: (ignored)                       |
   |=== CS high ===========================>
   |                                       |
-  |                       DMA writes payload into Pico RX ring buffer
-  |                       Pico processes messages, forwards to 6502
+  |                       DMA writes into Pico RX ring buffer
+  |                       Pico parses messages, forwards to 6502
 ```
+
+If the Zero is unsure about buffer space, it does a REQUEST/READ first to
+get a fresh BUF value.
 
 #### Pico sends data to Zero (e.g., 6502 wrote to a device)
 
 ```
 Zero                                    Pico
   |                                       |
-  |                       6502 writes to device, data enters Pico TX buffer
-  |                       Pico loads SPI TX DMA from TX buffer
+  |                       6502 writes to device, data enters Pico TX queue
   |                       Pico asserts IRQ (drives low)
   |                                       |
-  |<-- IRQ triggers GPIO interrupt -------|
+  |<-- IRQ (falling edge) ---------------|
   |                                       |
-  |=== SPI transaction (CS low) ==========>
-  | MOSI: [CMD=READ][LEN=max][SEQ]       |
-  | MISO: [STS][AVL=M][BUF]              |
-  | MOSI: [dummy 0x00, M bytes]          |
-  | MISO: [payload, M bytes]             |
+  |=== REQUEST (CS low) =================>
+  | MOSI: [0x02]                          |
+  | MISO: (ignored)                       |
   |=== CS high ===========================>
   |                                       |
-  |                       Pico deasserts IRQ if TX buffer is now empty
+  |                       Pico sees REQUEST in RX ring
+  |                       Pico prepares READ_SIZE response buffer
+  |                       Pico loads SPI TX DMA
+  |                       Pico asserts READY (drives low)
+  |                       Pico deasserts IRQ (data is being handled)
+  |                                       |
+  |<-- READY (low) ----------------------|
+  |                                       |
+  |=== READ (CS low) ====================>
+  | MOSI: [0x03][0x00 x1502]             |  (READ_SIZE = 1503 bytes)
+  | MISO: [LEN_HI][LEN_LO][BUF][payload...pad]
+  |       (full-duplex, simultaneous)     |
+  |=== CS high ===========================>
+  |                                       |
+  |  Zero reads LEN valid payload bytes   |
+  |  Zero notes BUF for future WRITEs     |
+  |                                       |
+  |                       Pico deasserts READY
+  |                       If more data in TX queue: assert IRQ again
 ```
 
-The actual transfer length is `min(LEN, AVL)`. If `AVL` is 0 (Pico had no data
-despite IRQ -- possible race), the transaction ends after the header with no
-payload.
-
-#### Status poll
+#### Zero checks Pico buffer space (REQUEST/READ poll)
 
 ```
 Zero                                    Pico
   |                                       |
-  |=== SPI transaction (CS low) ==========>
-  | MOSI: [CMD=STATUS][0][0][SEQ]        |
-  | MISO: [STS][AVL][BUF]                |
+  |=== REQUEST (CS low) =================>
+  | MOSI: [0x02]                          |
+  | MISO: (ignored)                       |
   |=== CS high ===========================>
+  |                                       |
+  |                       Pico prepares response (LEN=0, BUF=current)
+  |                       Pico loads SPI TX DMA
+  |                       Pico asserts READY
+  |                                       |
+  |<-- READY (low) ----------------------|
+  |                                       |
+  |=== READ (CS low) ====================>
+  | MOSI: [0x03][0x00 x1502]             |
+  | MISO: [0x00][0x00][BUF][0x00 ...]    |  (LEN=0, just status)
+  |=== CS high ===========================>
+  |                                       |
+  |  Zero notes BUF for future WRITEs     |
+  |                                       |
+  |                       Pico deasserts READY
 ```
 
-Useful for checking buffer space before a large WRITE, or as a heartbeat.
+### Signal State Rules
+
+The Zero must respect the following rules:
+
+1. **READY high (deasserted)**: Zero may send WRITE or REQUEST. Zero must NOT
+   send READ.
+2. **READY low (asserted)**: Zero must send READ. Zero must NOT send WRITE or
+   REQUEST.
+3. After a READ completes (CS high), the Zero must wait for READY to go high
+   before sending any new transaction.
+
+The Pico must respect:
+
+1. IRQ is asserted at boot to signal readiness (even with no data).
+2. READY is only asserted after TX DMA is fully configured.
+3. READY is deasserted after a READ completes (CS rising edge).
+4. IRQ is deasserted when a REQUEST is received (the data is being handled).
+   It is re-asserted if more data remains in the TX queue after the READ.
 
 ### Backpressure
 
-Two complementary mechanisms:
+The `BUF` field in every READ response tells the Zero how much free space the
+Pico has, in 64-byte units (0x00 = full, 0xFF = 16 KB+ free).
 
-1. **READY pin (hardware, fast).** Directly readable by Zero without an SPI
-   transaction. Pico deasserts READY when its RX free buffer drops below a
-   low-water mark (e.g., 256 bytes). Zero must not start a WRITE while READY
-   is low. Pico reasserts READY when free space rises above a high-water mark
-   (e.g., 512 bytes). Hysteresis prevents oscillation.
+The Zero tracks the last-known BUF value and does not send a WRITE whose payload
+exceeds `BUF * 64` bytes. After each WRITE, the Zero decrements its local BUF
+estimate by the amount sent. It refreshes BUF from the next READ response.
 
-2. **BUF field (software, precise).** The BUF byte in every response header
-   gives exact free space (in 64-byte units). Zero can use this to choose
-   how much data to send in the next WRITE, packing the payload right up to
-   the available space.
-
-The READY pin provides a fast, always-available guard rail. The BUF field
-allows the Zero to make smarter batching decisions.
+If the Zero's estimate reaches zero (or it hasn't communicated recently), it
+does a REQUEST/READ poll before sending more data.
 
 ### DMA Strategy
 
@@ -225,18 +327,24 @@ allows the Zero to make smarter batching decisions.
 
 The RP2350 hardware SPI slave supports DMA on both TX and RX channels.
 
-**RX (incoming writes from Zero):**
+**RX (incoming WRITEs and commands from Zero):**
+
 * DMA channel configured to write from SPI RX FIFO into a ring buffer (e.g., 4-8 KB).
 * Similar to the existing 6502 bus interface DMA strategy: use `TRIGGER_SELF`
   with a ring buffer and epoch-based overrun detection.
-* After each transaction (CS deasserted), software scans the ring buffer for
-  complete messages and dispatches them.
+* After each transaction (CS deasserted, detected via GPIO interrupt on CS pin),
+  software scans the ring buffer for the command byte and dispatches accordingly.
 
-**TX (outgoing reads to Zero):**
-* When the Pico has data to send, it copies messages into a staging buffer and
-  configures the SPI TX DMA to send from that buffer.
-* Then asserts IRQ. The Zero will clock the data out.
-* One-shot DMA (not ring buffer) because the Pico knows the exact size and content.
+**TX (outgoing READs to Zero):**
+
+* Triggered by a REQUEST command. The Pico copies messages from its TX queue
+  into a `READ_SIZE`-byte staging buffer:
+  `[LEN_HI][LEN_LO][BUF][payload...zero-padded to 1500]`.
+* Configures SPI TX DMA to send from that buffer (one-shot, not ring).
+* Asserts READY. The Zero will clock out exactly `READ_SIZE` bytes.
+* After CS rises, the Pico deasserts READY and frees the staging buffer.
+* **No race condition**: the REQUEST/READY handshake guarantees the master
+  won't clock until DMA is loaded.
 
 #### Pi Zero -- SPI Master
 
@@ -244,24 +352,25 @@ The BCM2835 SPI controller has DMA support. The Linux `spidev` kernel driver
 uses DMA for transfers above a configurable threshold (typically 96 bytes).
 
 For maximum throughput, the Zero-side userspace code should:
-* Use `ioctl(SPI_IOC_MESSAGE)` with a single `spi_ioc_transfer` struct
-  containing both TX and RX buffers (to get the simultaneous header exchange).
-* Batch multiple messages into a single SPI transaction when possible.
 
-An IRQ-driven approach on the Zero side:
-* Configure GPIO 25 as input with falling-edge interrupt (`/sys/class/gpio` or
-  `libgpiod`).
-* On interrupt, perform a READ transaction.
-* Optionally, use a dedicated thread that blocks on `poll()` for the GPIO edge
-  event, then performs the SPI transfer.
+* Use `ioctl(SPI_IOC_MESSAGE)` with a `spi_ioc_transfer` struct containing
+  both TX and RX buffers.
+* Batch multiple messages into a single SPI WRITE transaction when possible.
+
+IRQ handling on the Zero side:
+
+* Configure GPIO 25 as input with falling-edge interrupt using `libgpiod`.
+* When IRQ fires, send REQUEST, poll GPIO 24 for READY, then send READ.
+* READY polling can use `libgpiod` level-wait or busy-poll (the delay is
+  typically only a few microseconds).
 
 ## Clock Speed Selection
 
 | SPI Clock | Raw throughput | Effective (~80% utilization) | Notes |
 |-----------|---------------|------------------------------|-------|
-| 5 MHz | 625 KB/s | ~500 KB/s | Conservative, works with longer wires |
-| 10 MHz | 1.25 MB/s | ~1 MB/s | Good default |
-| 20 MHz | 2.5 MB/s | ~2 MB/s | Needs short wires or PCB traces |
+| 5 MHz     | 625 KB/s      | ~500 KB/s                    | Conservative, works with longer wires |
+| 10 MHz    | 1.25 MB/s     | ~1 MB/s                      | Good default |
+| 20 MHz    | 2.5 MB/s      | ~2 MB/s                      | Needs short wires or PCB traces |
 
 Start at 10 MHz. The RP2350 SPI slave can handle it comfortably at 150 MHz
 system clock. The Pi Zero's BCM2835 SPI master can generate it exactly
@@ -269,23 +378,137 @@ system clock. The Pi Zero's BCM2835 SPI master can generate it exactly
 
 ## Error Handling
 
-* **Sequence numbers**: The SEQ field allows both sides to detect gaps (missed
-  transactions) or duplicates (retransmitted transactions after a timeout).
-* **OVERRUN flag**: If the Pico's RX ring buffer is overwritten before the CPU
-  can process it, the OVERRUN bit is set. The Zero should back off and may need
-  to retransmit.
+* **OVERRUN**: If the Pico's RX ring buffer is overwritten before the CPU
+  can process it, data is lost. The Zero can detect this indirectly if the
+  Pico stops responding to expected messages. The BUF field helps prevent
+  this by letting the Zero self-throttle.
 * **CRC (optional)**: For added reliability, append a CRC-8 to each message
-  inside the payload. The 4-byte header is small enough that corruption there
-  would typically cause a detectable protocol error (bad CMD, impossible length,
-  etc.) rather than silent data corruption.
-* **Timeouts**: If the Zero sends a READ but the Pico's DMA wasn't ready, AVL
-  will be 0 and no payload is exchanged. The Zero simply retries on the next IRQ.
+  inside the payload. The SPI headers are small enough that corruption
+  would typically cause a detectable protocol error (bad CMD, impossible length)
+  rather than silent data corruption.
+* **Timeouts**: If the Pico asserts IRQ but the Zero doesn't respond within a
+  timeout (e.g., 100 ms), the Pico can deassert IRQ and re-queue the data.
+  If the Pico doesn't assert READY within a timeout after REQUEST, the Zero
+  can retry the REQUEST.
+* **Protocol violations**: If the Zero sends READ without REQUEST, or sends
+  a transaction while READY is asserted, the Pico's RX ring will contain
+  unexpected data. The Pico discards unrecognized commands.
+
+## Protocol Comparison and Design Notes
+
+This protocol occupies an unusual niche: a point-to-point link between two known
+devices, with a master/slave physical layer but bidirectional data flow. Here's
+how it relates to other protocols and what we borrowed (or didn't) from each.
+
+### USB
+
+USB is the closest analogy in terms of architecture: a host (master) polls a
+device (slave) that can't transmit unsolicited data.
+
+**What USB does that we borrowed:**
+* **Fixed transfer sizes.** USB bulk transfers use fixed max packet sizes
+  (64 B for Full Speed, 512 B for High Speed). Our `READ_SIZE` is the same
+  idea. Both sides agree on the size upfront; no per-transfer negotiation.
+* **NAK as flow control.** When a USB device isn't ready, it responds NAK and
+  the host retries later. Our BUF field serves a similar role -- the Zero
+  checks available space before sending -- but shifted to a "check before you
+  send" model rather than "try and get rejected." We can't do NAK because MISO
+  is ignored during WRITEs.
+
+**What USB does that we don't need:**
+* **Enumeration and descriptors.** USB devices self-describe their capabilities
+  through a multi-step enumeration process. We have a fixed, known topology --
+  one Pico, one Zero, forever. Eliminating this removes enormous complexity.
+* **Multiple endpoint types.** USB has Control, Bulk, Interrupt, and Isochronous
+  transfer types for different latency/bandwidth tradeoffs. We have one
+  transfer type (best-effort, similar to Bulk) because our single use case
+  doesn't need the others.
+* **Toggle bits.** USB uses DATA0/DATA1 alternation for simple duplicate
+  detection. We could add this (1 bit in the header) if reliability becomes
+  a concern, but over a 10 cm wire it's likely unnecessary.
+
+**What USB does that we can't:**
+* **Hardware protocol engine.** USB's framing, CRC, retries, and NAK handling
+  are all in dedicated silicon. We're building on raw SPI with no protocol
+  hardware, so every mechanism must be explicit and simple.
+
+### Ethernet (Layer 2)
+
+**What Ethernet does that influenced us:**
+* **MTU = 1500 bytes.** Our `READ_SIZE` payload (1500 B) matches the Ethernet
+  MTU so that a full network packet transits the SPI link without fragmentation.
+  This is a deliberate choice given that Internet access is a primary use case.
+* **Fire-and-forget at L2.** Ethernet frames have no acknowledgment at the link
+  layer; reliability is TCP's job. Our WRITEs are similarly fire-and-forget.
+
+**What Ethernet does that we don't need:**
+* **CRC-32 on every frame.** Ethernet runs over cables in electrically noisy
+  environments with connectors that can degrade. Our link is 10 cm of wire
+  between two boards. CRC is optional and probably unnecessary.
+* **Minimum frame size (64 bytes).** Ethernet pads small frames for collision
+  detection. We have no collisions (point-to-point, master-initiated).
+* **Preamble and SFD.** Ethernet needs 8 bytes of synchronization before each
+  frame. SPI's CS line provides unambiguous frame boundaries for free.
+
+### SD Card (SPI Mode)
+
+The most directly comparable protocol -- an SPI slave device with a
+command-response model.
+
+**What SD does that we considered and rejected:**
+* **0xFF busy polling.** The SD card sends 0xFF while processing a command; the
+  host keeps clocking until it sees a non-0xFF response byte. Elegant, but
+  relies on the SD controller hardware always outputting 0xFF when idle. The
+  PL022 has no such guarantee -- its underrun behavior is implementation-defined.
+  We use the READY GPIO handshake instead, which is unambiguous.
+
+**What SD does that we share:**
+* **Fixed block sizes.** SD cards transfer 512-byte blocks. Our `READ_SIZE` is
+  the same concept at a different size.
+* **Command-first, response-later.** The SD protocol sends a command, then
+  the card responds. Our REQUEST/READ flow is the same pattern, with READY
+  as the explicit "response is loaded" signal.
+
+### I2C
+
+**One interesting feature we can't have:**
+* **Clock stretching.** An I2C slave can hold SCL low to say "I'm not ready
+  yet." This elegantly solves the slave-not-ready problem at the hardware level.
+  SPI slaves have no equivalent -- the master controls the clock unconditionally.
+  Our READY pin serves the same purpose at the protocol level: it tells the
+  master "don't clock yet, I'm preparing my response."
+
+### ESP32 SPI Slave (WiFi offload)
+
+This is perhaps the closest existing system to what we're building: an SPI slave
+acting as a network bridge, using GPIO handshake lines.
+
+**What ESP32 does similarly:**
+* **GPIO handshake for "data ready."** The ESP32 SPI slave protocol uses a GPIO
+  line (like our IRQ) to signal "I have data." Validates our approach.
+* **~1600-byte transfers.** Sized to fit Ethernet frames, same reasoning as ours.
+* **Two handshake pins** ("data ready" + "slave ready"). Our IRQ + READY design
+  matches the ESP32 approach. This is a validated pattern for SPI slave protocols
+  that need bidirectional initiation.
+
+### Summary of Design Choices
+
+| Concern | Our approach | Alternative (and why not) |
+|---------|-------------|--------------------------|
+| Slave initiation | IRQ pin | Polling (wasteful), clock stretching (SPI can't) |
+| Slave TX timing | REQUEST/READY handshake | Two-phase STATUS (timing assumptions, stale TX FIFO), "always loaded" buffer (race during switch) |
+| Flow control | BUF field in READ response | NAK (can't respond during WRITE), software-only STATUS poll (complex) |
+| Transfer size | Fixed `READ_SIZE` | Negotiated per-transfer (requires header exchange before DMA setup) |
+| Framing | CS line + length prefix | Sentinel bytes (PL022 underrun undefined), CRC delimiters (overhead) |
+| Reliability | None (best-effort) | CRC + retransmit (overkill for 10 cm wire) |
+| Enumeration | None (fixed topology) | Self-description (USB-style, massive complexity for no benefit) |
 
 ## Future Extensions
 
 * **Full-duplex data**: During a WRITE, the Pico could simultaneously return
   data on MISO (instead of ignoring it). This would double effective throughput
-  for bidirectional workloads. Adds complexity to DMA setup on both sides.
+  for bidirectional workloads. Adds complexity to DMA setup -- would need a
+  REQUEST before the WRITE to give the Pico time to load TX DMA.
 * **Multi-CS**: If multiple Picos are used (e.g., one per function), the Zero
   can use CE0/CE1 to address different slaves.
 * **Bulk DMA transfers**: For large payloads (e.g., loading a ROM image), a

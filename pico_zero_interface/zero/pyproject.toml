@@ -1,0 +1,11 @@
+[project]
+name = "pico-zero-spi"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = [
+    "spidev",
+    "gpiod>=2.0",
+]
+
+[project.scripts]
+test-spi = "test_spi:main"
