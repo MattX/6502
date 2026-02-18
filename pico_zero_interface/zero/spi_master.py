@@ -34,7 +34,7 @@ PIN_READY = 24          # Input, active low ("TX DMA loaded, safe to READ")
 
 SPI_BUS = 0
 SPI_DEVICE = 0          # CE0
-SPI_SPEED_HZ = 1_000_000
+SPI_SPEED_HZ = 8_000_000
 SPI_MODE = 3            # CPOL=1, CPHA=1 (PL022 slave requires Mode 1 or 3 for multi-byte)
 
 
