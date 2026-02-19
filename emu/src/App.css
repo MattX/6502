@@ -1,0 +1,170 @@
+.app {
+  font-family: sans-serif;
+  padding: 1rem;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+button {
+  padding: 0.3rem 0.8rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.rom-upload-btn {
+  cursor: pointer;
+  padding: 0.3rem 0.8rem;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  font-size: 0.9rem;
+  user-select: none;
+}
+
+.rom-upload-btn input[type="file"] {
+  display: none;
+}
+
+/* Top-level layout: CPU widget left, memory panels right */
+.main-layout {
+  display: flex;
+  gap: 2rem;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.cpu-widget h2,
+.cpu-widget h3 {
+  margin: 0.5rem 0 0.25rem;
+}
+
+/* ZP and Stack side by side */
+.memory-panels {
+  display: flex;
+  gap: 1.5rem;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.memory-panels h3 {
+  margin: 0.5rem 0 0.25rem;
+}
+
+/* All tables use monospace */
+table {
+  border-collapse: collapse;
+  font-family: monospace;
+  font-size: 0.82rem;
+}
+
+th,
+td {
+  padding: 0.1rem 0.35rem;
+  text-align: left;
+  border: 1px solid #888;
+  white-space: nowrap;
+}
+
+.registers th {
+  text-align: right;
+}
+
+/* Disassembly listing */
+.disassembly {
+  font-family: monospace;
+  font-size: 0.82rem;
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #888;
+  overflow-x: auto;
+  white-space: pre;
+  min-width: 20ch;
+}
+
+/* Page browser hex input */
+.page-input {
+  font-family: monospace;
+  font-size: inherit;
+  width: 2.5ch;
+  text-align: center;
+  border: 1px solid #888;
+  background: inherit;
+  color: inherit;
+  padding: 0 2px;
+}
+
+/* LCD canvas */
+.lcd-widget {
+  margin-bottom: 1rem;
+}
+
+.lcd-widget h3 {
+  margin: 0.5rem 0 0.25rem;
+}
+
+.lcd-canvas {
+  display: block;
+  border: 1px solid #888;
+  max-width: 100%;
+}
+
+/* Stack pointer marker */
+.marker-row .addr {
+  font-weight: bold;
+}
+
+.marker-cell {
+  font-weight: bold;
+  outline: 2px solid currentColor;
+  outline-offset: -2px;
+}
+
+/* Dark mode */
+@media (prefers-color-scheme: dark) {
+  body {
+    background-color: #1a1a1a;
+    color: #e0e0e0;
+  }
+
+  th,
+  td {
+    border-color: #555;
+  }
+
+  .disassembly {
+    background-color: #0d1a0d;
+    color: #88dd88;
+    border-color: #555;
+  }
+
+  .marker-row td {
+    background-color: #1a1500;
+  }
+
+  .marker-cell {
+    background-color: #554400 !important;
+    color: #ffdd44;
+  }
+}
+
+/* Light mode */
+@media (prefers-color-scheme: light) {
+  .disassembly {
+    background-color: #f5fff5;
+    color: #004400;
+  }
+
+  .marker-row td {
+    background-color: #fffbe0;
+  }
+
+  .marker-cell {
+    background-color: #ffe033 !important;
+    color: #332200;
+  }
+}
