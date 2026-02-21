@@ -48,6 +48,7 @@ target_link_libraries(bridge PUBLIC
     hardware_gpio
     hardware_spi
     hardware_irq
+    hardware_pwm
 )
 
 # Create map/bin/hex/uf2 files

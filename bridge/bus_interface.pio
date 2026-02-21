@@ -113,9 +113,9 @@ static inline void bus_interface_program_init(PIO pio, uint sm, uint offset) {
     gpio_set_dir(BUS_PIN_CS_N, GPIO_IN);
     gpio_set_pulls(BUS_PIN_CS_N, true, false);  // Pull-up (deselected by default)
 
-    gpio_init(BUS_PIN_PHI2);
-    gpio_set_dir(BUS_PIN_PHI2, GPIO_IN);
-    gpio_set_pulls(BUS_PIN_PHI2, false, false);
+    // gpio_init(BUS_PIN_PHI2);
+    // gpio_set_dir(BUS_PIN_PHI2, GPIO_IN);
+    // gpio_set_pulls(BUS_PIN_PHI2, false, false);
 
     // Initialize data bus pins
     for (int i = 0; i < BUS_PIN_D_COUNT; i++) {

@@ -16,12 +16,20 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "hardware/pwm.h"
+#include "hardware/clocks.h"
+#include "hardware/gpio.h"
 #include "pico/stdlib.h"
 #include "bus_interface.h"
 #include "spi_slave.h"
 
+// 6502 PHI2 clock output pin (PWM)
+#define PIN_6502_PHI2 2
 // 6502 IRQ pin (active-low output)
 #define PIN_6502_IRQ 3
+
+// Target clock frequency for the 6502.
+#define CLK_SPEED_6502 1000000  // 1 MHz target clock frequency for 6502
 
 // SPI RX parser state
 static enum {
@@ -137,6 +145,34 @@ static void update_6502_irq(void) {
 }
 
 // ============================================================================
+// 6502 Clock management
+// ============================================================================
+
+void setup_6502_clock() {
+    gpio_set_function(PIN_6502_PHI2, GPIO_FUNC_PWM);
+    uint slice_num = pwm_gpio_to_slice_num(PIN_6502_PHI2);
+
+    // Calculate the wrap value for the target frequency.
+    // Assuming divider = 1.0: wrap = (f_sys / f_pwm) - 1
+    uint32_t f_sys = clock_get_hz(clk_sys);
+    uint32_t wrap = (f_sys / CLK_SPEED_6502) - 1;
+    assert(wrap <= 0xffff);  // Wrap is 16 bits, so max PWM frequency is f_sys / 65536
+
+    // Configure the PWM slice
+    pwm_config config = pwm_get_default_config();
+    pwm_config_set_clkdiv(&config, 1.0f); // Fixed 1.0 divider for zero jitter
+    pwm_config_set_wrap(&config, (uint16_t)wrap);
+    pwm_init(slice_num, &config, /*start=*/false);
+
+    // Set a 50% duty cycle
+    uint32_t level = (wrap + 1) / 2;
+    pwm_set_gpio_level(PIN_6502_PHI2, level);
+    printf("System clock: %lu Hz, PWM wrap: %lu, level: %lu\n", (unsigned long)f_sys, (unsigned long)wrap, (unsigned long)level);
+
+    pwm_set_enabled(slice_num, true);
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -148,6 +184,9 @@ int main(void) {
     printf("  6502 bus: GPIO 0-2 (ctrl), 6-13 (data)\n");
     printf("  SPI:      GPIO 16-19 (SPI0), 20 (IRQ), 21 (READY)\n");
     printf("  6502 IRQ: GPIO %d\n\n", PIN_6502_IRQ);
+
+    // --- 6502 PHI2 clock ---
+    setup_6502_clock();
 
     // --- 6502 IRQ pin (set value BEFORE direction to avoid glitch) ---
     gpio_init(PIN_6502_IRQ);
