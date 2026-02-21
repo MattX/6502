@@ -1,0 +1,10 @@
+[package]
+name = "shein"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+spidev = "0.6"
+gpiocdev = "0.7"
+anyhow = "1"
+rustyline = "15"
