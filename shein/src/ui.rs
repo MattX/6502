@@ -8,7 +8,7 @@ use crate::terminal::{Terminal, COLS, ROWS};
 
 pub struct StatusInfo {
     pub device_status: u8,
-    pub buf: u8,
+    pub buf: [u8; 8],
     pub connected: bool,
     pub verbose: bool,
 }
@@ -65,7 +65,6 @@ fn draw_terminal(frame: &mut Frame, terminal: &Terminal, area: Rect) {
 fn draw_status(frame: &mut Frame, status: &StatusInfo, area: Rect) {
     let mut lines = vec![
         Line::from(if status.connected { "Connected" } else { "Disconnected" }),
-        Line::from(format!("BUF: {}", status.buf)),
         Line::from(format!("Verbose: {}", if status.verbose { "ON" } else { "off" })),
         Line::from(""),
         Line::from("Devices:"),
@@ -75,12 +74,13 @@ fn draw_status(frame: &mut Frame, status: &StatusInfo, area: Rect) {
     for (i, name) in device_names.iter().enumerate() {
         let active = status.device_status & (1 << i) != 0;
         let marker = if active { ">" } else { " " };
+        let buf_val = status.buf[i];
         let style = if active {
             Style::default().fg(Color::Green)
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        lines.push(Line::styled(format!(" {marker} {i}: {name}"), style));
+        lines.push(Line::styled(format!(" {marker} {i}: {name:<8} [{buf_val:>3}]"), style));
     }
 
     lines.push(Line::from(""));

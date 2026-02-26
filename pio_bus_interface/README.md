@@ -4,18 +4,9 @@ This project implements a byte-stream interface between a 6502 CPU and an RP2350
 
 ## Overview
 
-The traditional approach (see `mcu_interface/`) requires:
-- 1x CPLD (ATF750LVC) for bus timing and handshake logic
-- 3x 74HC574 latches (TX, RX, Status)
-
-This PIO-based approach requires:
-- **No external logic ICs** - just direct GPIO connections
-- External address decode logic (e.g., 74HC138) to generate CS_N
-
 ## Target Hardware
 
-- **MCU:** RP2350 (Raspberry Pi Pico 2)
-- **Tested on:** Adafruit Feather RP2350
+**MCU:** RP2350 (Raspberry Pi Pico 2)
 
 ## Pin Mapping
 
@@ -52,7 +43,7 @@ This saves 4 cycles compared to extracting each signal separately.
 ```
 CPU writes: [device] [length] [data...]
   - device: 0-127 (bit 7 must be 0)
-  - length: 1-255 bytes
+  - length: 0-255 bytes
   - data: the payload
 ```
 
@@ -67,6 +58,8 @@ CPU reads:  [data...] (length bytes)
 ```
 
 The 0xFF sentinel eliminates the need for a separate status register. The CPU simply polls by reading until it gets a non-0xFF value.
+
+**Important:** The 6502 must not stop polling before receiving a non-0xFF byte; in particular, interrupts should be disabled during this time. This prevents a race where the Pico sets up DMA for device N, but the 6502 has already moved on to request device M.
 
 ### 6502 Assembly Example
 

@@ -23,8 +23,8 @@
 
 // --- Protocol constants (must match Zero side) ---
 
-#define SPI_SLAVE_READ_SIZE     1503    // 3-byte header + 1500-byte payload
-#define SPI_SLAVE_MAX_PAYLOAD   1500
+#define SPI_SLAVE_MAX_PAYLOAD   1542    // 257*6: room for 6 max-size TLV packets
+#define SPI_SLAVE_READ_SIZE     (SPI_SLAVE_MAX_PAYLOAD + 10)  // 8 buf + 2 len + payload
 
 // Command bytes (first byte of MOSI)
 #define SPI_CMD_WRITE   0x01
@@ -56,28 +56,22 @@ bool spi_slave_init(void);
 // If IRQ is not already asserted, this will assert it.
 bool spi_slave_tx_queue(const uint8_t *data, uint16_t len);
 
-// Drain up to max_bytes from the RX queue into dst.
-// Returns the number of bytes actually copied.
-uint16_t spi_slave_rx_drain(uint8_t *dst, uint16_t max_bytes);
-
-// Returns the number of bytes currently in the RX queue.
-uint16_t spi_slave_rx_available(void);
-
 // Call regularly from main loop. Processes completed RX transactions,
 // handles REQUEST by preparing TX DMA and asserting READY, and
 // manages IRQ/READY state after READ completes.
 void spi_slave_task(void);
 
-// Returns current free space for WRITE payloads, in 64-byte units (BUF field).
-// Accounts for both RX queue usage and unprocessed DMA ring data.
-uint8_t spi_slave_get_buf(void);
+// RX callback: called when a WRITE payload is received from the Zero.
+// |data| points to a contiguous buffer containing the complete payload;
+// it is only valid for the duration of the callback.
+typedef void (*spi_slave_rx_callback_t)(const uint8_t *data, uint16_t len);
+void spi_slave_set_rx_callback(spi_slave_rx_callback_t cb);
 
 // --- Stats ---
 
 typedef struct {
     uint32_t rx_writes;         // WRITE transactions received
     uint32_t rx_bytes;          // Total payload bytes received via WRITE
-    uint32_t rx_overflows;      // WRITE payloads dropped (RX queue full)
     uint32_t tx_reads;          // READ transactions completed
     uint32_t tx_bytes;          // Total payload bytes sent via READ
     uint32_t requests;          // REQUEST commands handled

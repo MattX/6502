@@ -31,21 +31,6 @@
 // Target clock frequency for the 6502.
 #define CLK_SPEED_6502 1000000  // 1 MHz target clock frequency for 6502
 
-// SPI RX parser state
-static enum {
-    SPI_RX_IDLE,
-    SPI_RX_GOT_DEVICE,
-    SPI_RX_RECEIVING,
-} spi_rx_state = SPI_RX_IDLE;
-
-static uint8_t spi_rx_device;
-static uint8_t spi_rx_remaining;
-static uint8_t spi_rx_msg[255];
-static uint8_t spi_rx_pos;
-
-// Drain buffer for SPI RX queue
-static uint8_t spi_rx_buf[512];
-
 // Stats
 static uint32_t bus_to_spi_msgs = 0;
 static uint32_t bus_to_spi_bytes = 0;
@@ -72,51 +57,24 @@ static void bus_to_spi_callback(uint8_t device, const uint8_t *data, uint16_t le
 }
 
 // ============================================================================
-// Zero -> 6502: drain SPI RX queue, parse TLV, write to bus device buffers
+// Zero -> 6502: SPI RX callback parses TLV and writes to bus device buffers
 // ============================================================================
 
-static void process_spi_rx_byte(uint8_t byte) {
-    switch (spi_rx_state) {
-        case SPI_RX_IDLE:
-            if (byte < BUS_MAX_DEVICES) {
-                spi_rx_device = byte;
-                spi_rx_state = SPI_RX_GOT_DEVICE;
-            } else {
-                printf("SPI RX: invalid dev %x", byte);
+static void spi_rx_callback(const uint8_t *data, uint16_t len) {
+    uint16_t pos = 0;
+    while (pos + 2 <= len) {
+        uint8_t device = data[pos];
+        uint8_t tlv_len = data[pos + 1];
+        if (pos + 2 + tlv_len > len) break;
+        if (device < BUS_MAX_DEVICES && tlv_len > 0) {
+            uint16_t written = bus_device_write(device, &data[pos + 2], tlv_len);
+            if (written < tlv_len) {
+                spi_to_bus_drops++;
             }
-            // Invalid device ID: discard and stay idle
-            break;
-
-        case SPI_RX_GOT_DEVICE:
-            spi_rx_remaining = byte;
-            spi_rx_pos = 0;
-            if (spi_rx_remaining == 0) {
-                spi_rx_state = SPI_RX_IDLE;
-            } else {
-                spi_rx_state = SPI_RX_RECEIVING;
-            }
-            break;
-
-        case SPI_RX_RECEIVING:
-            spi_rx_msg[spi_rx_pos++] = byte;
-            spi_rx_remaining--;
-            if (spi_rx_remaining == 0) {
-                uint16_t written = bus_device_write(spi_rx_device, spi_rx_msg, spi_rx_pos);
-                if (written < spi_rx_pos) {
-                    spi_to_bus_drops++;
-                }
-                spi_to_bus_msgs++;
-                spi_to_bus_bytes += spi_rx_pos;
-                spi_rx_state = SPI_RX_IDLE;
-            }
-            break;
-    }
-}
-
-static void drain_and_parse_spi_rx(void) {
-    uint16_t n = spi_slave_rx_drain(spi_rx_buf, sizeof(spi_rx_buf));
-    for (uint16_t i = 0; i < n; i++) {
-        process_spi_rx_byte(spi_rx_buf[i]);
+            spi_to_bus_msgs++;
+            spi_to_bus_bytes += tlv_len;
+        }
+        pos += 2 + tlv_len;
     }
 }
 
@@ -210,6 +168,7 @@ int main(void) {
         printf("ERROR: spi_slave_init failed\n");
         return 1;
     }
+    spi_slave_set_rx_callback(spi_rx_callback);
 
     printf("Ready.\n\n");
 
@@ -218,7 +177,6 @@ int main(void) {
     while (1) {
         bus_task();
         spi_slave_task();
-        drain_and_parse_spi_rx();
         update_6502_irq();
 
         // Periodic stats
@@ -242,11 +200,10 @@ int main(void) {
                    (unsigned long)bs.rx_bankruptcies,
                    (unsigned long)bs.tx_underflows);
 
-            printf("       spi: wr=%lu rd=%lu req=%lu oflow=%lu proto_err=%lu\n",
+            printf("       spi: wr=%lu rd=%lu req=%lu proto_err=%lu\n",
                    (unsigned long)ss.rx_writes,
                    (unsigned long)ss.tx_reads,
                    (unsigned long)ss.requests,
-                   (unsigned long)ss.rx_overflows,
                    (unsigned long)ss.proto_errors);
 
             last_stats = now;

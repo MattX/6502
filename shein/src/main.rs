@@ -13,7 +13,7 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScree
 use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 
-use spi_master::{IrqWatcher, SpiMaster, MAX_PAYLOAD};
+use spi_master::{IrqWatcher, SpiMaster, MAX_PAYLOAD, NUM_DEVICES};
 use terminal::Terminal;
 use ui::StatusInfo;
 
@@ -21,41 +21,25 @@ const NETBOOT_FILE: &str = "boot.bin";
 const MAX_TLV_DATA: usize = 254; // 255 reserved for busy
 const LOG_CAPACITY: usize = 1000;
 
-/// RX reassembly buffer for TLV messages that may straddle SPI frame boundaries.
-struct TlvRxBuf {
-    buf: Vec<u8>,
-}
-
-impl TlvRxBuf {
-    fn new() -> Self {
-        Self { buf: Vec::new() }
-    }
-
-    /// Append raw SPI payload data and drain all complete TLV messages.
-    fn push(&mut self, data: &[u8]) -> Vec<(u8, Vec<u8>)> {
-        self.buf.extend_from_slice(data);
-        let mut msgs = Vec::new();
-        loop {
-            if self.buf.len() < 2 {
-                break;
-            }
-            let length = self.buf[1] as usize;
-            if self.buf.len() < 2 + length {
-                break;
-            }
-            let device = self.buf[0];
-            let data = self.buf[2..2 + length].to_vec();
-            self.buf.drain(..2 + length);
-            msgs.push((device, data));
+/// Parse a SPI payload containing complete TLV packets (no straddling).
+fn parse_tlv_payload(payload: &[u8]) -> Vec<(u8, Vec<u8>)> {
+    let mut msgs = Vec::new();
+    let mut pos = 0;
+    while pos + 2 <= payload.len() {
+        let device = payload[pos];
+        let length = payload[pos + 1] as usize;
+        if pos + 2 + length > payload.len() {
+            break;
         }
-        msgs
+        msgs.push((device, payload[pos + 2..pos + 2 + length].to_vec()));
+        pos += 2 + length;
     }
+    msgs
 }
 
 struct App {
     master: SpiMaster,
     irq: IrqWatcher,
-    rxbuf: TlvRxBuf,
     terminal: Terminal,
     log: Vec<String>,
     verbose: bool,
@@ -76,7 +60,6 @@ impl App {
             },
             master,
             irq,
-            rxbuf: TlvRxBuf::new(),
             terminal: Terminal::new(),
             log: Vec::new(),
             verbose: false,
@@ -137,8 +120,7 @@ impl App {
                     self.status.buf = self.master.buf;
                     if !payload.is_empty() {
                         self.log_verbose(format!("SPI RX {} bytes", payload.len()));
-                        let msgs = self.rxbuf.push(&payload);
-                        for (device, data) in msgs {
+                        for (device, data) in parse_tlv_payload(&payload) {
                             self.dispatch_rx(device, &data);
                         }
                     }
@@ -199,34 +181,47 @@ impl App {
         }
     }
 
-    /// Try to drain the TX queue. If the buffer estimate is zero, does a
-    /// request_and_read to refresh it (the Pico may have consumed data without
-    /// having anything to send back). Stops when still out of space after that.
+    /// Try to drain the TX queue with per-device buffer checking.
+    /// Each tx_queue entry is a TLV frame: [device][len][data...].
+    /// Checks per-device buffer estimates before sending. If blocked,
+    /// does a request_and_read to refresh estimates and retries once.
     fn drain_tx_queue(&mut self) -> Result<()> {
-        while let Some(payload) = self.tx_queue.front() {
-            if self.master.write(payload)? {
-                self.log_verbose(format!("SPI TX {} bytes", payload.len()));
-                self.tx_queue.pop_front();
-                self.status.buf = self.master.buf;
-            } else {
-                // Refresh buf estimate — the Pico may have freed space
+        loop {
+            // Extract info from front TLV without holding the borrow
+            let (device, data_len) = match self.tx_queue.front() {
+                Some(tlv) => (tlv[0] as usize, tlv[1] as usize),
+                None => break,
+            };
+
+            // Cost in 16-byte units (data bytes only; TLV header is not stored
+            // in the device buffer on the Pico side)
+            let cost = ((data_len + 15) / 16) as u8;
+
+            if device < NUM_DEVICES && cost > self.master.buf[device] {
+                // Not enough buffer space — refresh estimates
                 if let Some((rx_payload, _)) = self.master.request_and_read(Duration::from_millis(100))? {
                     self.status.buf = self.master.buf;
                     if !rx_payload.is_empty() {
-                        let msgs = self.rxbuf.push(&rx_payload);
-                        for (device, data) in msgs {
-                            self.dispatch_rx(device, &data);
+                        for (dev, data) in parse_tlv_payload(&rx_payload) {
+                            self.dispatch_rx(dev, &data);
                         }
                     }
                 }
-                // Try once more, then give up until next iteration
-                if !self.master.write(self.tx_queue.front().unwrap())? {
-                    break;
+                // Check again after refresh
+                if device < NUM_DEVICES && cost > self.master.buf[device] {
+                    break; // Still blocked, give up until next iteration
                 }
-                self.log_verbose(format!("SPI TX {} bytes (after refresh)", self.tx_queue.front().unwrap().len()));
-                self.tx_queue.pop_front();
-                self.status.buf = self.master.buf;
             }
+
+            let payload = self.tx_queue.pop_front().unwrap();
+            self.master.write(&payload)?;
+            self.log_verbose(format!("SPI TX {} bytes (dev {})", payload.len(), device));
+
+            // Deduct cost from local estimate
+            if device < NUM_DEVICES {
+                self.master.buf[device] = self.master.buf[device].saturating_sub(cost);
+            }
+            self.status.buf = self.master.buf;
         }
         Ok(())
     }
@@ -299,7 +294,7 @@ fn main() -> Result<()> {
         println!("TIMEOUT on initial sync");
         return Ok(());
     }
-    println!("Connected (BUF={})", master.buf);
+    println!("Connected (BUF={:?})", master.buf);
 
     // Set up TUI
     enable_raw_mode()?;

@@ -6,19 +6,17 @@
  * Architecture:
  *   - RX path: DMA continuously writes SPI RX FIFO into a ring buffer.
  *     A GPIO interrupt on CS rising edge signals end-of-transaction.
- *     spi_slave_task() then parses the received data and copies WRITE
- *     payloads into the RX queue for the application to consume.
+ *     spi_slave_task() then parses the received data and delivers WRITE
+ *     payloads directly to the application via a registered callback.
  *
  *   - TX path: When a REQUEST is received, the Pico prepares a READ_SIZE
  *     staging buffer, configures TX DMA, and asserts READY. The Zero then
  *     sends a READ to clock out the data. After CS rises, READY is
  *     deasserted.
  *
- *   - Flow control (BUF): The BUF field in READ responses reports free
- *     space in the RX queue (minus unprocessed DMA ring data), so the
- *     Zero knows how much it can WRITE. The DMA ring buffer is always
- *     drained regardless of RX queue fullness, so REQUEST/READ always
- *     work even when the RX queue is full.
+ *   - Flow control: The READ response includes per-device buffer free
+ *     space (8 bytes, in 16-byte units), so the Zero knows how much it
+ *     can WRITE per device.
  *
  *   - No race conditions: the REQUEST/READY handshake guarantees the master
  *     won't start a READ until TX DMA is fully loaded.
@@ -29,6 +27,7 @@
  */
 
 #include "spi_slave.h"
+#include "bus_interface.h"
 
 #include "pico/stdlib.h"
 #include "hardware/spi.h"
@@ -68,12 +67,11 @@ static uint tx_queue_head = 0;
 static uint tx_queue_tail = 0;
 static uint tx_queue_len = 0;
 
-// RX queue: WRITE payloads waiting to be consumed by application (Zero -> Pico).
-#define RX_QUEUE_SIZE 4096
-static uint8_t rx_queue[RX_QUEUE_SIZE];
-static uint rx_queue_head = 0;
-static uint rx_queue_tail = 0;
-static uint rx_queue_len = 0;
+// RX callback for WRITE payloads
+static spi_slave_rx_callback_t rx_callback = NULL;
+
+// Temp buffer for copying WRITE payloads out of the DMA ring
+static uint8_t rx_temp[SPI_SLAVE_MAX_PAYLOAD];
 
 // Protocol state
 typedef enum {
@@ -112,52 +110,19 @@ static inline void ready_pin_deassert(void) {
     gpio_put(SPI_SLAVE_PIN_READY, 1);  // Idle high
 }
 
-uint8_t spi_slave_get_buf(void) {
-    // Free space in RX queue
-    uint rx_free = RX_QUEUE_SIZE - rx_queue_len;
-
-    // Pessimistic adjustment: unprocessed DMA ring data may become WRITE
-    // payloads that will be pushed into the RX queue
-    uint dma_wr = get_dma_rx_write_idx();
-    uint dma_rd = rx_read_idx;
-    uint dma_pending = (dma_wr - dma_rd) & (SPI_SLAVE_RX_RING_SIZE - 1);
-
-    uint effective_free = (dma_pending >= rx_free) ? 0 : rx_free - dma_pending;
-    uint buf = effective_free / 64;
-    return (buf > 0xFF) ? 0xFF : (uint8_t)buf;
+static inline uint8_t tx_queue_peek(uint offset) {
+    return tx_queue[(tx_queue_head + offset) & (TX_QUEUE_SIZE - 1)];
 }
 
-// Push bytes from the DMA ring buffer into the RX queue, handling wrap.
-static uint rx_queue_push_from_ring(uint ring_rd, uint len) {
-    uint space = RX_QUEUE_SIZE - rx_queue_len;
-    uint to_copy = (len > space) ? space : len;
-    if (to_copy == 0) return 0;
-
-    uint tail = rx_queue_tail;
-    for (uint i = 0; i < to_copy; i++) {
-        rx_queue[tail] = rx_ring[ring_rd];
-        ring_rd = (ring_rd + 1) & (SPI_SLAVE_RX_RING_SIZE - 1);
-        tail = (tail + 1) & (RX_QUEUE_SIZE - 1);
-    }
-    rx_queue_tail = tail;
-    rx_queue_len += to_copy;
-    return to_copy;
-}
-
-// Drain up to max_bytes from tx_queue into dst. Returns bytes copied.
-static uint tx_queue_drain(uint8_t *dst, uint max_bytes) {
-    uint to_copy = tx_queue_len;
-    if (to_copy > max_bytes) to_copy = max_bytes;
-    if (to_copy == 0) return 0;
-
+// Drain exactly |count| bytes from tx_queue into dst.
+static void tx_queue_drain(uint8_t *dst, uint count) {
     uint head = tx_queue_head;
-    for (uint i = 0; i < to_copy; i++) {
+    for (uint i = 0; i < count; i++) {
         dst[i] = tx_queue[head];
         head = (head + 1) & (TX_QUEUE_SIZE - 1);
     }
     tx_queue_head = head;
-    tx_queue_len -= to_copy;
-    return to_copy;
+    tx_queue_len -= count;
 }
 
 // ============================================================================
@@ -186,16 +151,44 @@ static void cs_rise_handler(uint gpio, uint32_t events) {
 // ============================================================================
 
 static void prepare_and_load_tx(void) {
-    // Pack: [LEN_HI] [LEN_LO] [BUF] [payload ... zero-padded]
-    uint payload_len = tx_queue_drain(&tx_buf[3], SPI_SLAVE_MAX_PAYLOAD);
+    // --- Per-device buffer estimates (bytes 0..7) ---
+    for (uint8_t d = 0; d < BUS_MAX_DEVICES; d++) {
+        uint16_t free_bytes = bus_device_tx_free(d);
+        uint units = free_bytes / 16;
+        tx_buf[d] = (units > 255) ? 255 : (uint8_t)units;
+    }
 
-    tx_buf[0] = (uint8_t)(payload_len >> 8);
-    tx_buf[1] = (uint8_t)(payload_len & 0xFF);
-    tx_buf[2] = spi_slave_get_buf();
+    // --- Payload: pack complete TLV packets only (bytes 10+) ---
+    uint8_t *payload = &tx_buf[10];
+    uint payload_len = 0;
+
+    while (tx_queue_len >= 2) {
+        uint8_t tlv_dev = tx_queue_peek(0);
+        uint8_t tlv_len = tx_queue_peek(1);
+        uint tlv_total = 2 + tlv_len;
+
+        if (tlv_total > tx_queue_len) {
+            // Incomplete TLV in queue (shouldn't happen, but be safe)
+            break;
+        }
+
+        if (payload_len + tlv_total > SPI_SLAVE_MAX_PAYLOAD) {
+            // Won't fit in this frame
+            break;
+        }
+
+        // Drain this complete TLV into the payload
+        tx_queue_drain(&payload[payload_len], tlv_total);
+        payload_len += tlv_total;
+    }
+
+    // --- Length field (bytes 8..9, big-endian) ---
+    tx_buf[8] = (uint8_t)(payload_len >> 8);
+    tx_buf[9] = (uint8_t)(payload_len & 0xFF);
 
     // Zero-pad remainder
     if (payload_len < SPI_SLAVE_MAX_PAYLOAD) {
-        memset(&tx_buf[3 + payload_len], 0, SPI_SLAVE_MAX_PAYLOAD - payload_len);
+        memset(&payload[payload_len], 0, SPI_SLAVE_MAX_PAYLOAD - payload_len);
     }
 
     stats.tx_bytes += payload_len;
@@ -260,12 +253,12 @@ static void process_transaction(void) {
             stats.rx_writes++;
             stats.rx_bytes += payload_len;
 
-            // Copy payload from DMA ring into RX queue
-            if (payload_len > 0) {
-                uint pushed = rx_queue_push_from_ring(rd, payload_len);
-                if (pushed < payload_len) {
-                    stats.rx_overflows++;
+            // Deliver payload via callback
+            if (rx_callback && payload_len > 0) {
+                for (uint16_t i = 0; i < payload_len; i++) {
+                    rx_temp[i] = rx_ring[(rd + i) & (SPI_SLAVE_RX_RING_SIZE - 1)];
                 }
+                rx_callback(rx_temp, payload_len);
             }
 
             rd = (rd + payload_len) & (SPI_SLAVE_RX_RING_SIZE - 1);
@@ -363,15 +356,17 @@ bool spi_slave_init(void) {
     tx_queue_head = 0;
     tx_queue_tail = 0;
     tx_queue_len = 0;
-    rx_queue_head = 0;
-    rx_queue_tail = 0;
-    rx_queue_len = 0;
+    rx_callback = NULL;
     state = STATE_IDLE;
 
     // Assert IRQ to signal "I'm ready" to the Zero.
     irq_pin_assert();
 
     return true;
+}
+
+void spi_slave_set_rx_callback(spi_slave_rx_callback_t cb) {
+    rx_callback = cb;
 }
 
 bool spi_slave_tx_queue(const uint8_t *data, uint16_t len) {
@@ -392,25 +387,6 @@ bool spi_slave_tx_queue(const uint8_t *data, uint16_t len) {
     }
 
     return true;
-}
-
-uint16_t spi_slave_rx_drain(uint8_t *dst, uint16_t max_bytes) {
-    uint to_copy = rx_queue_len;
-    if (to_copy > max_bytes) to_copy = max_bytes;
-    if (to_copy == 0) return 0;
-
-    uint head = rx_queue_head;
-    for (uint i = 0; i < to_copy; i++) {
-        dst[i] = rx_queue[head];
-        head = (head + 1) & (RX_QUEUE_SIZE - 1);
-    }
-    rx_queue_head = head;
-    rx_queue_len -= to_copy;
-    return (uint16_t)to_copy;
-}
-
-uint16_t spi_slave_rx_available(void) {
-    return (uint16_t)rx_queue_len;
 }
 
 void spi_slave_task(void) {

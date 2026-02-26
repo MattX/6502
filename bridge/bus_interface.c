@@ -465,6 +465,11 @@ uint16_t bus_device_tx_count(uint8_t device) {
     return device_tx_buffers[device].count;
 }
 
+uint16_t bus_device_tx_free(uint8_t device) {
+    if (device >= BUS_MAX_DEVICES) return 0;
+    return BUS_MAX_BUFFER_SIZE - device_tx_buffers[device].count;
+}
+
 bus_stats_t bus_get_stats(void) {
     return stats;
 }

@@ -21,7 +21,7 @@
 #define BUS_MAX_DEVICES     8
 
 // Maximum TX buffer size per device
-#define BUS_MAX_BUFFER_SIZE 1024
+#define BUS_MAX_BUFFER_SIZE 4096
 
 // RX callback: called when a complete write transaction is received.
 // |data| points into the DMA ring buffer and is only valid for the
@@ -54,6 +54,9 @@ void bus_device_clear(uint8_t device);
 
 // Returns the number of bytes in a device's TX buffer
 uint16_t bus_device_tx_count(uint8_t device);
+
+// Returns the free space in a device's TX buffer (bytes)
+uint16_t bus_device_tx_free(uint8_t device);
 
 // Get statistics
 typedef struct {
