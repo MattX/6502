@@ -31,6 +31,12 @@ typedef void (*bus_rx_callback_t)(uint8_t device, const uint8_t *data, uint16_t 
 // Register a callback for a device (NULL to unregister)
 void bus_register_rx_callback(uint8_t device, bus_rx_callback_t callback);
 
+// TX callback: called when 6502 reads from this device.
+// Fill `data` with up to `max_len` bytes, return actual length (0 = no data).
+// When set, the device's circular buffer is bypassed entirely.
+typedef uint8_t (*bus_tx_callback_t)(uint8_t *data, uint8_t max_len);
+void bus_register_tx_callback(uint8_t device, bus_tx_callback_t callback);
+
 // Initialize the bus interface (PIO + DMA)
 // Returns true on success, false on failure
 bool bus_init(void);

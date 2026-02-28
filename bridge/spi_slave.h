@@ -67,6 +67,9 @@ void spi_slave_task(void);
 typedef void (*spi_slave_rx_callback_t)(const uint8_t *data, uint16_t len);
 void spi_slave_set_rx_callback(spi_slave_rx_callback_t cb);
 
+// Returns true if at least one SPI command has been received from the Zero.
+bool spi_slave_is_connected(void);
+
 // --- Stats ---
 
 typedef struct {

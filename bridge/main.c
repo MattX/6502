@@ -39,6 +39,28 @@ static uint32_t spi_to_bus_bytes = 0;
 static uint32_t spi_to_bus_drops = 0;
 
 // ============================================================================
+// Device 0: local status register (not forwarded over SPI)
+// ============================================================================
+
+static uint8_t device0_tx_callback(uint8_t *data, uint8_t max_len) {
+    if (max_len < 2) return 0;
+
+    // Byte 0: bitmask of devices with data available (always 0 for device 0)
+    uint8_t avail = 0;
+    for (uint8_t i = 1; i < BUS_MAX_DEVICES; i++) {
+        if (bus_device_tx_count(i) > 0) {
+            avail |= (1 << i);
+        }
+    }
+    data[0] = avail;
+
+    // Byte 1: SPI bridge connected (at least 1 command received)
+    data[1] = spi_slave_is_connected() ? 1 : 0;
+
+    return 2;
+}
+
+// ============================================================================
 // 6502 -> Zero: bus RX callback forwards to SPI TX queue
 // ============================================================================
 
@@ -66,7 +88,7 @@ static void spi_rx_callback(const uint8_t *data, uint16_t len) {
         uint8_t device = data[pos];
         uint8_t tlv_len = data[pos + 1];
         if (pos + 2 + tlv_len > len) break;
-        if (device < BUS_MAX_DEVICES && tlv_len > 0) {
+        if (device > 0 && device < BUS_MAX_DEVICES && tlv_len > 0) {
             uint16_t written = bus_device_write(device, &data[pos + 2], tlv_len);
             if (written < tlv_len) {
                 spi_to_bus_drops++;
@@ -86,7 +108,7 @@ static bool irq_6502_asserted = false;
 
 static void update_6502_irq(void) {
     bool any_data = false;
-    for (uint8_t i = 0; i < BUS_MAX_DEVICES; i++) {
+    for (uint8_t i = 1; i < BUS_MAX_DEVICES; i++) {
         if (bus_device_tx_count(i) > 0) {
             any_data = true;
             break;
@@ -157,7 +179,11 @@ int main(void) {
         return 1;
     }
 
-    for (uint8_t d = 0; d < BUS_MAX_DEVICES; d++) {
+    // Device 0: local status register (reads handled by TX callback)
+    bus_register_tx_callback(0, device0_tx_callback);
+
+    // Devices 1-7: forward to/from SPI
+    for (uint8_t d = 1; d < BUS_MAX_DEVICES; d++) {
         bus_register_rx_callback(d, bus_to_spi_callback);
     }
 

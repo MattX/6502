@@ -83,6 +83,9 @@ static device_buffer_t device_tx_buffers[BUS_MAX_DEVICES];
 // Per-device RX callbacks
 static bus_rx_callback_t rx_callbacks[BUS_MAX_DEVICES];
 
+// Per-device TX callbacks (bypass circular buffer when set)
+static bus_tx_callback_t tx_callbacks[BUS_MAX_DEVICES];
+
 // Temp buffer for assembling wrapped DMA ring data (max transfer = 255)
 static uint8_t rx_transaction_buf[255];
 
@@ -121,9 +124,16 @@ void bus_register_rx_callback(uint8_t device, bus_rx_callback_t callback) {
     }
 }
 
+void bus_register_tx_callback(uint8_t device, bus_tx_callback_t callback) {
+    if (device < BUS_MAX_DEVICES) {
+        tx_callbacks[device] = callback;
+    }
+}
+
 bool bus_init(void) {
     memset(device_tx_buffers, 0, sizeof(device_tx_buffers));
     memset(rx_callbacks, 0, sizeof(rx_callbacks));
+    memset(tx_callbacks, 0, sizeof(tx_callbacks));
     memset(&stats, 0, sizeof(stats));
 
     // Load PIO program
@@ -374,19 +384,31 @@ static void feed_tx_fifo(void) {
 
     // Handle pending read request (only if no DMA in flight)
     if (pending_read_request && proto_state != PROTO_SENDING) {
-        device_buffer_t *buf = &device_tx_buffers[pending_read_device];
+        uint8_t len = 0;
 
-        if (buf->count > 0) {
-            // Build staging buffer: [length, data0, data1, ...]
-            uint8_t len = (buf->count > 254) ? 254 : buf->count;
+        // If a TX callback is registered, use it instead of the device buffer
+        bus_tx_callback_t tx_cb = tx_callbacks[pending_read_device];
+        if (tx_cb) {
+            uint8_t cb_data[254];
+            len = tx_cb(cb_data, 254);
             tx_staging[0] = (uint32_t)len;
-
-            for (uint16_t i = 0; i < len; i++) {
-                tx_staging[1 + i] = (uint32_t)buf->data[buf->tail];
-                buf->tail = (buf->tail + 1) % BUS_MAX_BUFFER_SIZE;
-                buf->count--;
+            for (uint8_t i = 0; i < len; i++) {
+                tx_staging[1 + i] = (uint32_t)cb_data[i];
             }
+        } else {
+            device_buffer_t *buf = &device_tx_buffers[pending_read_device];
+            if (buf->count > 0) {
+                len = (buf->count > 254) ? 254 : buf->count;
+                tx_staging[0] = (uint32_t)len;
+                for (uint16_t i = 0; i < len; i++) {
+                    tx_staging[1 + i] = (uint32_t)buf->data[buf->tail];
+                    buf->tail = (buf->tail + 1) % BUS_MAX_BUFFER_SIZE;
+                    buf->count--;
+                }
+            }
+        }
 
+        if (len > 0) {
             stats.tx_bytes += len;
 
             // Configure and start one-shot DMA transfer

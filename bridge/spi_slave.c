@@ -408,6 +408,10 @@ void spi_slave_task(void) {
     }
 }
 
+bool spi_slave_is_connected(void) {
+    return (stats.rx_writes + stats.requests + stats.tx_reads) > 0;
+}
+
 spi_slave_stats_t spi_slave_get_stats(void) {
     return stats;
 }
