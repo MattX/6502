@@ -8,7 +8,7 @@ use crate::terminal::{Terminal, COLS, ROWS};
 
 pub struct StatusInfo {
     pub device_status: u8,
-    pub buf: [u8; 8],
+    pub buf: [u8; super::NUM_DEVICES],
     pub connected: bool,
     pub verbose: bool,
 }

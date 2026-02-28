@@ -45,8 +45,8 @@ struct App {
     verbose: bool,
     status: StatusInfo,
     running: bool,
-    /// Outgoing SPI payloads (already TLV-framed, ready to write).
-    tx_queue: VecDeque<Vec<u8>>,
+    /// Per-device outgoing TLV queues (already framed, ready to write).
+    tx_queues: [VecDeque<Vec<u8>>; NUM_DEVICES],
 }
 
 impl App {
@@ -64,7 +64,7 @@ impl App {
             log: Vec::new(),
             verbose: false,
             running: true,
-            tx_queue: VecDeque::new(),
+            tx_queues: Default::default(),
         }
     }
 
@@ -172,57 +172,62 @@ impl App {
 
     /// Enqueue a TLV message for transmission, splitting into chunks if needed.
     fn enqueue_tlv(&mut self, device: u8, data: &[u8]) {
+        let dev = device as usize;
+        if dev >= NUM_DEVICES {
+            self.log(format!("enqueue_tlv: device {device} out of range, dropped"));
+            return;
+        }
         for chunk in data.chunks(MAX_TLV_DATA) {
             let mut payload = Vec::with_capacity(2 + chunk.len());
             payload.push(device);
             payload.push(chunk.len() as u8);
             payload.extend_from_slice(chunk);
-            self.tx_queue.push_back(payload);
+            self.tx_queues[dev].push_back(payload);
         }
     }
 
-    /// Try to drain the TX queue with per-device buffer checking.
-    /// Each tx_queue entry is a TLV frame: [device][len][data...].
-    /// Checks per-device buffer estimates before sending. If blocked,
-    /// does a request_and_read to refresh estimates and retries once.
+    /// Drain per-device TX queues into a single SPI frame (up to MAX_PAYLOAD).
+    /// Skips devices whose Pico buffer is full, avoiding head-of-line blocking.
     fn drain_tx_queue(&mut self) -> Result<()> {
+        let mut frame = Vec::new();
+
+        // Keep looping until no device can contribute a frame.
         loop {
-            // Extract info from front TLV without holding the borrow
-            let (device, data_len) = match self.tx_queue.front() {
-                Some(tlv) => (tlv[0] as usize, tlv[1] as usize),
-                None => break,
-            };
+            let mut progress = false;
 
-            // Cost in 16-byte units (data bytes only; TLV header is not stored
-            // in the device buffer on the Pico side)
-            let cost = ((data_len + 15) / 16) as u8;
+            for dev in 0..NUM_DEVICES {
+                while let Some(tlv) = self.tx_queues[dev].front() {
+                    let data_len = tlv[1] as usize;
+                    let tlv_len = 2 + data_len;
 
-            if device < NUM_DEVICES && cost > self.master.buf[device] {
-                // Not enough buffer space — refresh estimates
-                if let Some((rx_payload, _)) = self.master.request_and_read(Duration::from_millis(100))? {
-                    self.status.buf = self.master.buf;
-                    if !rx_payload.is_empty() {
-                        for (dev, data) in parse_tlv_payload(&rx_payload) {
-                            self.dispatch_rx(dev, &data);
-                        }
+                    if frame.len() + tlv_len > MAX_PAYLOAD {
+                        break;
                     }
-                }
-                // Check again after refresh
-                if device < NUM_DEVICES && cost > self.master.buf[device] {
-                    break; // Still blocked, give up until next iteration
+
+                    // Cost in 16-byte units (TLV header not stored in device buffer)
+                    let cost = ((data_len + 15) / 16) as u8;
+                    if cost > self.master.buf[dev] {
+                        break; // This device is blocked, try the next one
+                    }
+
+                    let payload = self.tx_queues[dev].pop_front().unwrap();
+                    frame.extend_from_slice(&payload);
+                    self.master.buf[dev] = self.master.buf[dev].saturating_sub(cost);
+                    progress = true;
                 }
             }
 
-            let payload = self.tx_queue.pop_front().unwrap();
-            self.master.write(&payload)?;
-            self.log_verbose(format!("SPI TX {} bytes (dev {})", payload.len(), device));
-
-            // Deduct cost from local estimate
-            if device < NUM_DEVICES {
-                self.master.buf[device] = self.master.buf[device].saturating_sub(cost);
+            if !progress {
+                break;
             }
+        }
+
+        if !frame.is_empty() {
+            self.log_verbose(format!("SPI TX {} bytes", frame.len()));
+            self.master.write(&frame)?;
             self.status.buf = self.master.buf;
         }
+
         Ok(())
     }
 

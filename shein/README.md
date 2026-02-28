@@ -47,7 +47,7 @@ Between REQUEST and READY, the Zero must not initiate another SPI transaction (g
 
 | ID | Name | Direction | Description |
 |----|------|-----------|-------------|
-| 0 | Status | Pico → Zero | Bit field: which devices have data. Second byte = Zero online. Errors as plain strings. |
+| 0 | Status | Local (Pico only) | Local status register. Not forwarded over SPI. Read returns 2 bytes: device availability bitmask + SPI connected flag. Writes ignored. |
 | 1 | System | Reserved | Soft shutdown, reset, clock control |
 | 2 | Video/KB | Bidirectional | Writes to video, reads from keyboard |
 | 3 | Netboot | Zero → Pico | Downloads program from Zero |
