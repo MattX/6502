@@ -38,6 +38,13 @@ This saves 4 cycles compared to extracting each signal separately.
 
 ## Protocol
 
+### Device 0: Bridge Status Register
+
+Device 0 is reserved as a local status register on the bridge MCU. It is not forwarded over SPI. Writes to device 0 are silently ignored. Reading device 0 always returns 2 bytes:
+
+- **Byte 0**: Bitmask of which devices have data available (bit N set = device N has data; bit 0 is always 0).
+- **Byte 1**: 1 if the SPI bridge is connected (at least one SPI command received), 0 otherwise.
+
 ### Writing Data (6502 → MCU)
 
 ```

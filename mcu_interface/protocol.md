@@ -73,31 +73,35 @@ When length = 0xFF, the following byte contains an error code:
 | 0x05-0xFE | Reserved |
 | 0xFF | Unspecified error |
 
-## Device ID 0: Interrupt Source
+## Device ID 0: Bridge Status Register
 
-Device ID 0 is reserved for interrupt management. When the MCU asserts an interrupt to the CPU, the CPU reads from device 0 to determine the source.
+Device ID 0 is reserved as a local status register on the bridge MCU. It is not forwarded over SPI. Writes to device 0 are silently ignored.
 
-### Reading Interrupt Source
+### Reading Status
 
 ```
 CPU sends:    [0x80]          ; Read from device 0
-MCU responds: [0x01] [dev_id] ; One byte: the interrupting device ID
-          or: [0x00]          ; No pending interrupts
+MCU responds: [0x02] [avail] [connected]
 ```
 
-If multiple devices have pending interrupts, each read returns one device ID (highest priority first). The CPU should loop until it receives length = 0:
+- **avail**: Bitmask of devices with data available for reading. Bit N = 1 means device N has data. Bit 0 is always 0 (device 0 itself).
+- **connected**: 1 if the SPI bridge to the Pi Zero is connected (at least one SPI command received), 0 otherwise.
+
+### Example
 
 ```asm
-poll_interrupts:
+check_status:
     LDA #$80            ; Read command, device 0
-    JSR mcu_write_byte
-    JSR mcu_read_byte   ; Get length
-    BEQ .done           ; Length 0 = no more interrupts
-    JSR mcu_read_byte   ; Get device ID
-    TAX
-    JSR handle_device_interrupt
-    BRA poll_interrupts
-.done:
+    STA DATA
+.wait:
+    LDA DATA
+    CMP #$FF
+    BEQ .wait           ; Poll until ready
+    ; A = length (always 2)
+    LDA DATA            ; Byte 0: device availability bitmask
+    STA avail_mask
+    LDA DATA            ; Byte 1: SPI connected flag
+    STA spi_connected
     RTS
 ```
 
@@ -105,7 +109,7 @@ poll_interrupts:
 
 | ID | Device | Description |
 |----|--------|-------------|
-| 0 | Interrupt controller | Returns pending interrupt sources |
+| 0 | Bridge status | Returns device availability bitmask and SPI connected flag |
 | 1 | USB keyboard | HID keyboard input |
 | 2 | SPI device 0 | First SPI peripheral |
 | 3 | SPI device 1 | Second SPI peripheral |
@@ -151,14 +155,11 @@ CPU → MCU: 0x04              ; 4 bytes follow
 CPU → MCU: 0xDE 0xAD 0xBE 0xEF
 ```
 
-### CPU Polls for Interrupts
+### CPU Reads Bridge Status
 
 ```
 CPU → MCU: 0x80              ; Read from device 0
-MCU → CPU: 0x01 0x01         ; Device 1 (keyboard) has data
-
-CPU → MCU: 0x80              ; Read from device 0 again
-MCU → CPU: 0x00              ; No more pending interrupts
+MCU → CPU: 0x02 0x04 0x01    ; Length=2, avail=0x04 (device 2 has data), connected=1
 ```
 
 ### Error Response
@@ -205,7 +206,7 @@ void handle_cpu_command() {
 
     if (is_read) {
         if (device == 0) {
-            send_pending_interrupt();
+            send_bridge_status();  // availability bitmask + SPI connected flag
         } else {
             send_device_response(device);
         }
