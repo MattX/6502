@@ -8,7 +8,7 @@ use crate::terminal::{Terminal, COLS, ROWS};
 
 pub struct StatusInfo {
     pub device_status: u8,
-    pub buf: [u8; super::NUM_DEVICES],
+    pub buf: [u16; super::NUM_DEVICES],
     pub connected: bool,
     pub verbose: bool,
 }
@@ -80,7 +80,7 @@ fn draw_status(frame: &mut Frame, status: &StatusInfo, area: Rect) {
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        lines.push(Line::styled(format!(" {marker} {i}: {name:<8} [{buf_val:>3}]"), style));
+        lines.push(Line::styled(format!(" {marker} {i}: {name:<8} [{buf_val:>4}]"), style));
     }
 
     lines.push(Line::from(""));

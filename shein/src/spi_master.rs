@@ -62,7 +62,7 @@ mod hw {
     pub struct SpiMaster {
         spi: Spidev,
         ready: Request,
-        pub buf: [u8; super::NUM_DEVICES],
+        pub buf: [u16; super::NUM_DEVICES],
     }
 
     impl SpiMaster {
@@ -84,7 +84,7 @@ mod hw {
                 .request()
                 .context("Failed to request READY GPIO")?;
 
-            Ok(Self { spi, ready, buf: [0u8; super::NUM_DEVICES] })
+            Ok(Self { spi, ready, buf: [0u16; super::NUM_DEVICES] })
         }
 
         fn wait_ready(&self, timeout: Duration) -> Result<bool> {
@@ -128,7 +128,7 @@ mod hw {
             Ok(true)
         }
 
-        pub fn request_and_read(&mut self, timeout: Duration) -> Result<Option<(Vec<u8>, [u8; super::NUM_DEVICES])>> {
+        pub fn request_and_read(&mut self, timeout: Duration) -> Result<Option<(Vec<u8>, [u16; super::NUM_DEVICES])>> {
             self.spi
                 .write_all(&[SPI_CMD_REQUEST])
                 .context("SPI REQUEST transfer failed")?;
@@ -148,8 +148,10 @@ mod hw {
 
             let _ = self.wait_ready_deasserted(Duration::from_millis(100));
 
-            // Bytes 0..8: per-device buffer estimates (in 16-byte units)
-            self.buf.copy_from_slice(&rx_buf[0..super::NUM_DEVICES]);
+            // Bytes 0..8: per-device buffer estimates (in 16-byte units), convert to bytes
+            for i in 0..super::NUM_DEVICES {
+                self.buf[i] = (rx_buf[i] as u16) * 16;
+            }
 
             // Bytes 8..10: payload length (big-endian)
             let payload_len = ((rx_buf[8] as usize) << 8) | (rx_buf[9] as usize);
@@ -190,12 +192,12 @@ mod hw {
     }
 
     pub struct SpiMaster {
-        pub buf: [u8; super::NUM_DEVICES],
+        pub buf: [u16; super::NUM_DEVICES],
     }
 
     impl SpiMaster {
         pub fn new() -> Result<Self> {
-            Ok(Self { buf: [255u8; super::NUM_DEVICES] })
+            Ok(Self { buf: [255 * 16; super::NUM_DEVICES] })
         }
 
         pub fn write(&mut self, payload: &[u8]) -> Result<bool> {
@@ -205,8 +207,8 @@ mod hw {
             Ok(true)
         }
 
-        pub fn request_and_read(&mut self, _timeout: Duration) -> Result<Option<(Vec<u8>, [u8; super::NUM_DEVICES])>> {
-            self.buf = [255u8; super::NUM_DEVICES];
+        pub fn request_and_read(&mut self, _timeout: Duration) -> Result<Option<(Vec<u8>, [u16; super::NUM_DEVICES])>> {
+            self.buf = [255 * 16; super::NUM_DEVICES];
             Ok(Some((Vec::new(), self.buf)))
         }
     }

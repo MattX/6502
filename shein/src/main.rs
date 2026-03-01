@@ -204,8 +204,8 @@ impl App {
                         break;
                     }
 
-                    // Cost in 16-byte units (TLV header not stored in device buffer)
-                    let cost = ((data_len + 15) / 16) as u8;
+                    // Cost in bytes (TLV header not stored in device buffer)
+                    let cost = data_len as u16;
                     if cost > self.master.buf[dev] {
                         break; // This device is blocked, try the next one
                     }
