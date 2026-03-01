@@ -116,10 +116,11 @@ static void update_6502_irq(void) {
     }
 
     if (any_data && !irq_6502_asserted) {
-        gpio_put(PIN_6502_IRQ, 0);  // Active low
+        gpio_put(PIN_6502_IRQ, 0);
+        gpio_set_dir(PIN_6502_IRQ, GPIO_OUT);  // Drive low
         irq_6502_asserted = true;
     } else if (!any_data && irq_6502_asserted) {
-        gpio_put(PIN_6502_IRQ, 1);  // Idle high
+        gpio_set_dir(PIN_6502_IRQ, GPIO_IN);   // Tristate (external pull-up)
         irq_6502_asserted = false;
     }
 }
@@ -168,10 +169,10 @@ int main(void) {
     // --- 6502 PHI2 clock ---
     setup_6502_clock();
 
-    // --- 6502 IRQ pin (set value BEFORE direction to avoid glitch) ---
+    // --- 6502 IRQ pin (active-low, tristated on boot) ---
     gpio_init(PIN_6502_IRQ);
-    gpio_put(PIN_6502_IRQ, 1);  // Latch high before enabling output
-    gpio_set_dir(PIN_6502_IRQ, GPIO_OUT);
+    gpio_put(PIN_6502_IRQ, 0);  // Latch low so asserting only needs dir change
+    gpio_set_dir(PIN_6502_IRQ, GPIO_IN);  // Tristate until data arrives
 
     // --- Bus interface ---
     if (!bus_init()) {
