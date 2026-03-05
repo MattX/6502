@@ -21,5 +21,5 @@ int main() {
     lcd_instruction(LCD_I_CLEAR);
     lcd_instruction(LCD_I_HOME);
     lcd_putstr("Waiting");
-    lcd_putnum('5');
+    lcd_putnum(5);
 }

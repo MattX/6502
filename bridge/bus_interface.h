@@ -76,4 +76,7 @@ typedef struct {
 bus_stats_t bus_get_stats(void);
 void bus_clear_stats(void);
 
+// Print PIO/DMA/protocol diagnostic state (call from stats block)
+void bus_diagnose(void);
+
 #endif // BUS_INTERFACE_H

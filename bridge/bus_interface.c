@@ -312,12 +312,17 @@ static void process_rx_data(void) {
         dma_rx_total_read++;
         stats.rx_bytes++;
 
+        if (((byte & 0x7F) == 7 || current_device == 7) &&
+            (proto_state == PROTO_IDLE || proto_state == PROTO_SENDING))
+            printf("RX byte=0x%02x state=%d\n", byte, proto_state);
+
         switch (proto_state) {
             case PROTO_IDLE:
                 // First byte: device number (bit 7 = read flag)
                 current_device = byte & 0x7F;
                 if (current_device >= BUS_MAX_DEVICES) {
-                    // Invalid device - discard and stay idle
+                    printf("!!! Invalid device %d (byte=0x%02x) in IDLE\n",
+                           current_device, byte);
                     break;
                 }
                 if (byte & 0x80) {
@@ -357,9 +362,11 @@ static void process_rx_data(void) {
 
             case PROTO_SENDING:
                 // Unexpected RX during send - treat as new command
+                printf("!!! RX byte=0x%02x during SENDING (dma_busy=%d)\n",
+                       byte, dma_channel_is_busy(dma_tx_chan));
                 current_device = byte & 0x7F;
                 if (current_device >= BUS_MAX_DEVICES) {
-                    // Invalid device - discard and return to idle
+                    printf("!!! Invalid device %d in SENDING\n", current_device);
                     proto_state = PROTO_IDLE;
                     break;
                 }
@@ -397,6 +404,8 @@ static void feed_tx_fifo(void) {
             }
         } else {
             device_buffer_t *buf = &device_tx_buffers[pending_read_device];
+            if (pending_read_device == 7)
+                printf("dev7 buf: count=%d head=%d tail=%d\n", buf->count, buf->head, buf->tail);
             if (buf->count > 0) {
                 len = (buf->count > 254) ? 254 : buf->count;
                 tx_staging[0] = (uint32_t)len;
@@ -407,6 +416,8 @@ static void feed_tx_fifo(void) {
                 }
             }
         }
+
+        printf("TX to bus, device=%d, len=%d\n", pending_read_device, len);
 
         if (len > 0) {
             stats.tx_bytes += len;
@@ -498,4 +509,28 @@ bus_stats_t bus_get_stats(void) {
 
 void bus_clear_stats(void) {
     memset(&stats, 0, sizeof(stats));
+}
+
+void bus_diagnose(void) {
+    // PIO state machine
+    uint8_t pc = pio_sm_get_pc(bus_pio, bus_sm);
+    uint tx_fifo = pio_sm_get_tx_fifo_level(bus_pio, bus_sm);
+    uint rx_fifo = pio_sm_get_rx_fifo_level(bus_pio, bus_sm);
+
+    // GPIO 6-13 pin directions (1=output, 0=input)
+    uint8_t pindirs = 0;
+    for (int i = 0; i < 8; i++) {
+        if (gpio_get_dir(BUS_PIN_D0 + i))
+            pindirs |= (1 << i);
+    }
+
+    // PIO pad output enables for data bus
+    uint32_t padoe = bus_pio->dbg_padoe;
+    uint8_t pio_oe = (padoe >> BUS_PIN_D0) & 0xFF;
+
+    printf("       diag: pc=%d tx_fifo=%d rx_fifo=%d pindirs=0x%02x pio_oe=0x%02x\n",
+           pc, tx_fifo, rx_fifo, pindirs, pio_oe);
+    printf("             proto=%d pending_rd=%d rd_dev=%d dma_tx_busy=%d dev7_buf=%d\n",
+           proto_state, pending_read_request, pending_read_device,
+           dma_channel_is_busy(dma_tx_chan), device_tx_buffers[7].count);
 }

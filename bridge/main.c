@@ -87,9 +87,12 @@ static void spi_rx_callback(const uint8_t *data, uint16_t len) {
     while (pos + 2 <= len) {
         uint8_t device = data[pos];
         uint8_t tlv_len = data[pos + 1];
+        printf("SPI RX: device=%d, tlv_len=%d\n", device, tlv_len);
         if (pos + 2 + tlv_len > len) break;
         if (device > 0 && device < BUS_MAX_DEVICES && tlv_len > 0) {
             uint16_t written = bus_device_write(device, &data[pos + 2], tlv_len);
+            if (device == 7)
+                printf("dev7 after spi_rx: written=%d, buf_count=%d\n", written, bus_device_tx_count(7));
             if (written < tlv_len) {
                 spi_to_bus_drops++;
             }
@@ -204,7 +207,8 @@ int main(void) {
     while (1) {
         bus_task();
         spi_slave_task();
-        update_6502_irq();
+        // Disabled - 6502 doesn't have a good IRQ handler yet.
+        // update_6502_irq();
 
         // Periodic stats
         uint32_t now = to_ms_since_boot(get_absolute_time());
@@ -232,6 +236,8 @@ int main(void) {
                    (unsigned long)ss.tx_reads,
                    (unsigned long)ss.requests,
                    (unsigned long)ss.proto_errors);
+
+            bus_diagnose();
 
             last_stats = now;
         }
