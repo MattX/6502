@@ -1,4 +1,4 @@
-import type CpuInterface from "6502.ts/lib/machine/cpu/CpuInterface";
+import CpuInterface from "6502.ts/lib/machine/cpu/CpuInterface";
 import "./App.css";
 import { MattbrewBoard, type ViaLcd } from "./peripherals";
 import { useState, useRef, useEffect } from "react";
@@ -35,7 +35,9 @@ function App() {
   }
 
   function cycle() {
-    mattbrewBoard.getCpu().cycle();
+    do {
+    mattbrewBoard.getTimer().tick(1);
+    } while (mattbrewBoard.getCpu().executionState !== 1);
     refresh();
   }
 
@@ -51,6 +53,7 @@ function App() {
     const reader = new FileReader();
     reader.onload = (ev) => {
       const data = new Uint8Array(ev.target!.result as ArrayBuffer);
+      console.log("ROM loaded:", file.name, data);
       mattbrewBoard.loadRom(data);
       mattbrewBoard.reset(true);
       mattbrewBoard.boot();
@@ -95,6 +98,18 @@ function CpuWidget({ cpu }: { cpu: CpuInterface }) {
   const disasmMarked = disasmLines
     .map((line, i) => (i === 0 ? "> " + line : "  " + line))
     .join("\n");
+  let executionState = '';
+  switch (cpu.executionState) {
+    case 0:
+      executionState = 'Boot';
+      break;
+    case 1:
+      executionState = 'Fetch';
+      break;
+    case 2:
+      executionState = 'Execute';
+      break;
+  }
 
   return (
     <div className="cpu-widget">
@@ -106,6 +121,7 @@ function CpuWidget({ cpu }: { cpu: CpuInterface }) {
           <tr><th>A</th><td>${s.a.toString(16).padStart(2, "0").toUpperCase()}</td></tr>
           <tr><th>X</th><td>${s.x.toString(16).padStart(2, "0").toUpperCase()}</td></tr>
           <tr><th>Y</th><td>${s.y.toString(16).padStart(2, "0").toUpperCase()}</td></tr>
+          <tr><th>State</th><td>{executionState}</td></tr>
         </tbody>
       </table>
       <h3>Disassembly</h3>

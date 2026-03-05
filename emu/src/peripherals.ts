@@ -4,17 +4,17 @@ import type VanillaMemory from '6502.ts/lib/machine/vanilla/Memory';
 import vrEmuLcd, { type LcdInstance } from 'vremulcd';
 
 export class MattbrewBoard extends Board {
-    bus: MattbrewBus = new MattbrewBus();
+    declare bus: MattbrewBus;
 
     loadRom(romData: Uint8Array): void {
         if (romData.length > 0x2000) {
             throw new Error('ROM data exceeds maximum size of 8KB');
         }
-        this.bus.rom = new ReadOnlyMemory(romData, 0xE000, 0x2000);
+        this.bus!.rom.replace(romData);
     }
 
     protected _createBus() {
-        // This may run before MattbrewBoard's constructor, so we need to build bus here.
+        // Called by parent constructor.
         this.bus = new MattbrewBus();
         return this.bus as unknown as VanillaMemory;
     }
@@ -128,6 +128,7 @@ export class ViaLcd implements BusInterface {
     }
 
     write(address: number, value: number): void {
+        console.info(`VIA write: address=0x${address.toString(16)}, value=0x${value.toString(16)}`);
         switch ((address - 0xC000) & 0x0F) {
             case 0: this.orb = value & 0xFF; break;
             case 1: this.writeOra(value & 0xFF); break;
@@ -158,6 +159,10 @@ export class ViaLcd implements BusInterface {
     }
 
     private latchToLcd(): void {
+        console.log('VIA: Latching to LCD, ORA=0x' + this.ora.toString(16) +
+            ', ORB=0x' + this.orb.toString(16) +
+            ', DDRA=0x' + this.ddra.toString(16) +
+            ', DDRB=0x' + this.ddrb.toString(16));
         if (!this.lcd) return;
 
         const rs = (this.ora >> 5) & 1;   // PA5: RS
@@ -208,6 +213,11 @@ export class Memory implements BusInterface {
         this.baseAddress = baseAddress;
         this.data = new Uint8Array(size);
         this.data.set(data.subarray(0, size));
+    }
+
+    replace(data: Uint8Array): void {
+        this.data.fill(0);
+        this.data.set(data.subarray(0, this.data.length));
     }
 
     read(address: number): number {

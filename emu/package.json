@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "6502.ts": "^1.1.4",
+    "6502.ts": "git+https://github.com/MattX/6502.ts#e460f88bafeae7850d17de8ed0b5e12ecb737b00",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "vremulcd": "git+https://github.com/MattX/vrEmuLcd#main"
