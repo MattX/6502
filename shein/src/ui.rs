@@ -6,6 +6,10 @@ use ratatui::Frame;
 
 use crate::terminal::{Terminal, COLS, ROWS};
 
+const PANE_HEIGHT: u16 = ROWS as u16 + 2; // 25 content rows + 2 border rows
+const MIN_WIDTH: u16 = COLS as u16 + 2 + 20; // terminal + status minimum
+const MIN_HEIGHT: u16 = PANE_HEIGHT + 3; // pane + at least 1 log line + 2 borders
+
 pub struct StatusInfo {
     pub device_status: u8,
     pub buf: [u16; super::NUM_DEVICES],
@@ -19,13 +23,25 @@ pub fn draw(
     status: &StatusInfo,
     log: &[String],
 ) {
+    let area = frame.area();
+    if area.height < MIN_HEIGHT || area.width < MIN_WIDTH {
+        let msg = format!(
+            "Terminal too small ({}x{}); need at least {}x{}",
+            area.width, area.height, MIN_WIDTH, MIN_HEIGHT
+        );
+        let block = Block::default().borders(Borders::ALL);
+        let paragraph = Paragraph::new(Line::from(msg)).block(block);
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(ROWS as u16 + 2), // terminal + border
-            Constraint::Length(12),            // log pane
+            Constraint::Length(PANE_HEIGHT), // terminal + border, exactly 25 content rows
+            Constraint::Min(3),              // log pane
         ])
-        .split(frame.area());
+        .split(area);
 
     let top = Layout::default()
         .direction(Direction::Horizontal)
@@ -94,16 +110,24 @@ fn draw_status(frame: &mut Frame, status: &StatusInfo, area: Rect) {
 }
 
 fn draw_log(frame: &mut Frame, log: &[String], area: Rect) {
-    let inner_height = area.height.saturating_sub(2) as usize; // minus border
-    let skip = log.len().saturating_sub(inner_height);
-    let lines: Vec<Line> = log[skip..]
-        .iter()
-        .map(|s| Line::from(s.as_str()))
-        .collect();
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let inner_width = area.width.saturating_sub(2) as usize;
+
+    let lines: Vec<Line> = log.iter().map(|s| Line::from(s.as_str())).collect();
+
+    // Calculate total visual rows accounting for line wrapping, then scroll to bottom.
+    let total_visual: usize = lines.iter().map(|line| {
+        let w = line.width();
+        if inner_width == 0 || w == 0 { 1 } else { w.div_ceil(inner_width) }
+    }).sum();
+    let scroll_offset = total_visual.saturating_sub(inner_height) as u16;
 
     let block = Block::default()
         .title(" Log ")
         .borders(Borders::ALL);
-    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_offset, 0));
     frame.render_widget(paragraph, area);
 }

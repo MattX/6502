@@ -113,13 +113,16 @@ impl App {
             return Ok(());
         }
 
+        self.log(format!("drain_spi: IRQ asserted"));
+        let mut round = 0u32;
         loop {
+            round += 1;
             let result = self.master.request_and_read(Duration::from_millis(100))?;
             match result {
                 Some((payload, _buf)) => {
                     self.status.buf = self.master.buf;
+                    self.log(format!("drain_spi[{round}]: READ {} payload bytes", payload.len()));
                     if !payload.is_empty() {
-                        self.log_verbose(format!("SPI RX {} bytes", payload.len()));
                         for (device, data) in parse_tlv_payload(&payload) {
                             self.dispatch_rx(device, &data);
                         }
@@ -128,7 +131,10 @@ impl App {
                         break;
                     }
                 }
-                None => break,
+                None => {
+                    self.log(format!("drain_spi[{round}]: READY timeout"));
+                    break;
+                }
             }
         }
         Ok(())
@@ -159,9 +165,16 @@ impl App {
                 self.send_netboot();
             }
             7 => {
-                // Echo: log and send back
-                let hex: Vec<String> = data.iter().map(|b| format!("{b:02x}")).collect();
-                self.log(format!("Echo: {}", hex.join(" ")));
+                // Echo: log summary and send back
+                let n = data.len();
+                let preview = if n <= 10 {
+                    data.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+                } else {
+                    let head: Vec<String> = data[..5].iter().map(|b| format!("{b:02x}")).collect();
+                    let tail: Vec<String> = data[n - 5..].iter().map(|b| format!("{b:02x}")).collect();
+                    format!("{} .. {}", head.join(" "), tail.join(" "))
+                };
+                self.log(format!("Echo: {n} bytes [{preview}]"));
                 self.enqueue_tlv(7, data);
             }
             _ => {
