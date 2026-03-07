@@ -442,7 +442,7 @@ bool spi_slave_tx_queue(const uint8_t *data, uint16_t len) {
     uint32_t saved = save_and_disable_interrupts();
     bool should_assert = (state == STATE_IDLE);
     restore_interrupts(saved);
-    printf("spi_enqueue: +%d total=%d state=%d irq=%d\n",
+    DBG_PRINTF("spi_enqueue: +%d total=%d state=%d irq=%d\n",
            len, tx_queue_len, (int)state, (int)should_assert);
     if (should_assert) {
         irq_pin_assert();
@@ -463,7 +463,7 @@ void spi_slave_task(void) {
     // After a READ completes (state returned to IDLE), check if more data
     // is queued and re-assert IRQ if so
     if (state == STATE_IDLE && tx_queue_len > 0) {
-        printf("spi_task: re-assert IRQ, queue=%d\n", tx_queue_len);
+        DBG_PRINTF("spi_task: re-assert IRQ, queue=%d\n", tx_queue_len);
         irq_pin_assert();
     }
 }

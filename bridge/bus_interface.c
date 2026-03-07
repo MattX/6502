@@ -491,9 +491,9 @@ void bus_diagnose(void) {
     uint32_t padoe = bus_pio->dbg_padoe;
     uint8_t pio_oe = (padoe >> BUS_PIN_D0) & 0xFF;
 
-    printf("       diag: pc=%d tx_fifo=%d rx_fifo=%d pindirs=0x%02x pio_oe=0x%02x\n",
+    DBG_PRINTF("       diag: pc=%d tx_fifo=%d rx_fifo=%d pindirs=0x%02x pio_oe=0x%02x\n",
            pc, tx_fifo, rx_fifo, pindirs, pio_oe);
-    printf("             proto=%d pending_rd=%d rd_dev=%d dma_tx_busy=%d dev7_buf=%d\n",
+    DBG_PRINTF("             proto=%d pending_rd=%d rd_dev=%d dma_tx_busy=%d dev7_buf=%d\n",
            proto_state, pending_read_request, pending_read_device,
            dma_channel_is_busy(dma_tx_chan), device_tx_buffers[7].count);
 }

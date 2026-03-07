@@ -113,7 +113,7 @@ impl App {
             return Ok(());
         }
 
-        self.log(format!("drain_spi: IRQ asserted"));
+        self.log_verbose(format!("drain_spi: IRQ asserted"));
         let mut round = 0u32;
         loop {
             round += 1;
@@ -121,7 +121,7 @@ impl App {
             match result {
                 Some((payload, _buf)) => {
                     self.status.buf = self.master.buf;
-                    self.log(format!("drain_spi[{round}]: READ {} payload bytes", payload.len()));
+                    self.log_verbose(format!("drain_spi[{round}]: READ {} payload bytes", payload.len()));
                     if !payload.is_empty() {
                         for (device, data) in parse_tlv_payload(&payload) {
                             self.dispatch_rx(device, &data);
@@ -174,7 +174,7 @@ impl App {
                     let tail: Vec<String> = data[n - 5..].iter().map(|b| format!("{b:02x}")).collect();
                     format!("{} .. {}", head.join(" "), tail.join(" "))
                 };
-                self.log(format!("Echo: {n} bytes [{preview}]"));
+                self.log_verbose(format!("Echo: {n} bytes [{preview}]"));
                 self.enqueue_tlv(7, data);
             }
             _ => {

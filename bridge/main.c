@@ -62,7 +62,7 @@ static void bus_to_spi_callback(uint8_t device, const uint8_t *data, uint16_t le
 
     // Check space upfront to avoid orphaning a header in the queue
     uint free = spi_slave_tx_queue_free();
-    printf("bus->spi: dev=%d len=%d free=%d\n", device, len, free);
+    DBG_PRINTF("bus->spi: dev=%d len=%d free=%d\n", device, len, free);
     if (free < len + 2) {
         printf("bus->spi: queue full, dropping\n");
         return;
@@ -233,7 +233,9 @@ int main(void) {
                    (unsigned long)ss.requests,
                    (unsigned long)ss.proto_errors);
 
+#if BRIDGE_DEBUG
             bus_diagnose();
+#endif
 
             last_stats = now;
         }
