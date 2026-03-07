@@ -33,6 +33,7 @@
 #include "hardware/spi.h"
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
+#include "hardware/irq.h"
 #include "hardware/sync.h"
 
 #include <stdio.h>
@@ -53,7 +54,12 @@ static uint8_t __attribute__((aligned(SPI_SLAVE_RX_RING_SIZE)))
 // Software read pointer into rx_ring
 static volatile uint rx_read_idx = 0;
 
-// No snapshot needed — process_transaction reads the live DMA write pointer.
+// Epoch counter: incremented by DMA IRQ each time the transfer count
+// wraps (every SPI_SLAVE_RX_RING_SIZE bytes).
+static volatile uint32_t dma_rx_epoch = 0;
+
+// Total bytes consumed by software (for overrun detection)
+static uint32_t dma_rx_total_read = 0;
 
 // TX staging buffer (single buffer -- no double-buffering needed since
 // we only prepare it in the safe window between REQUEST and READ)
@@ -90,6 +96,31 @@ static spi_slave_stats_t stats = {0};
 static inline uint get_dma_rx_write_idx(void) {
     uint32_t write_addr = dma_channel_hw_addr(dma_rx_chan)->write_addr;
     return write_addr - (uint32_t)rx_ring;
+}
+
+// DMA IRQ handler: called each time the transfer count reaches 0 and the
+// channel re-triggers.  This happens every SPI_SLAVE_RX_RING_SIZE bytes.
+static void __isr spi_dma_rx_irq_handler(void) {
+    dma_channel_acknowledge_irq1(dma_rx_chan);
+    dma_rx_epoch++;
+}
+
+// Compute total bytes written by DMA since start.
+// Same race-condition handling as bus_interface.c: see comments there.
+static inline uint32_t get_dma_rx_total_written(void) {
+    uint32_t epoch, remaining;
+    do {
+        epoch = dma_rx_epoch;
+        __compiler_memory_barrier();
+        remaining = dma_channel_hw_addr(dma_rx_chan)->transfer_count
+                    & DMA_TRANS_COUNT_COUNT_MASK;
+        __compiler_memory_barrier();
+    } while (epoch != dma_rx_epoch);
+    uint32_t total = epoch * SPI_SLAVE_RX_RING_SIZE + (SPI_SLAVE_RX_RING_SIZE - remaining);
+    if (total < dma_rx_total_read) {
+        total += SPI_SLAVE_RX_RING_SIZE;
+    }
+    return total;
 }
 
 static inline void irq_pin_assert(void) {
@@ -218,6 +249,15 @@ static void prepare_and_load_tx(void) {
 // ============================================================================
 
 static bool process_transaction(void) {
+    uint32_t total_written = get_dma_rx_total_written();
+    uint32_t unread = total_written - dma_rx_total_read;
+
+    if (unread > SPI_SLAVE_RX_RING_SIZE) {
+        printf("!!! FATAL: SPI RX DMA OVERRUN: %lu bytes lost\n",
+               (unsigned long)(unread - SPI_SLAVE_RX_RING_SIZE));
+        for (;;) tight_loop_contents();
+    }
+
     uint rd = rx_read_idx;
     uint wr = get_dma_rx_write_idx();
     uint avail = (wr - rd) & (SPI_SLAVE_RX_RING_SIZE - 1);
@@ -237,6 +277,7 @@ static bool process_transaction(void) {
 
             if (payload_len > SPI_SLAVE_MAX_PAYLOAD) {
                 stats.proto_errors++;
+                dma_rx_total_read += avail;
                 rx_read_idx = wr;  // Discard up to current write pointer
                 return true;
             }
@@ -260,6 +301,7 @@ static bool process_transaction(void) {
                 rx_callback(rx_temp, payload_len);
             }
 
+            dma_rx_total_read += 3 + payload_len;
             rx_read_idx = (rd + payload_len) & (SPI_SLAVE_RX_RING_SIZE - 1);
             return true;
         }
@@ -268,6 +310,7 @@ static bool process_transaction(void) {
             stats.requests++;
             state = STATE_REQUESTED;
             irq_pin_deassert();
+            dma_rx_total_read += 1;
             rx_read_idx = (rd + 1) & (SPI_SLAVE_RX_RING_SIZE - 1);
             return true;
         }
@@ -279,12 +322,14 @@ static bool process_transaction(void) {
             if (avail < SPI_SLAVE_READ_SIZE) return false;
             // CS rise handler already deasserted READY and set state=IDLE.
             stats.tx_reads++;
+            dma_rx_total_read += SPI_SLAVE_READ_SIZE;
             rx_read_idx = (rd + SPI_SLAVE_READ_SIZE) & (SPI_SLAVE_RX_RING_SIZE - 1);
             return true;
         }
 
         default: {
             stats.proto_errors++;
+            dma_rx_total_read += avail;
             rx_read_idx = wr;
             return true;
         }
@@ -340,6 +385,13 @@ bool spi_slave_init(void) {
         true  // Start immediately
     );
 
+    // DMA IRQ: fires each time transfer count reaches 0 (every
+    // SPI_SLAVE_RX_RING_SIZE bytes) to maintain the epoch counter.
+    // Uses DMA_IRQ_1 because bus_interface.c uses DMA_IRQ_0.
+    dma_channel_set_irq1_enabled(dma_rx_chan, true);
+    irq_set_exclusive_handler(DMA_IRQ_1, spi_dma_rx_irq_handler);
+    irq_set_enabled(DMA_IRQ_1, true);
+
     // --- DMA: TX channel (configured per-REQUEST, not started yet) ---
     dma_tx_chan = dma_claim_unused_channel(true);
 
@@ -350,6 +402,8 @@ bool spi_slave_init(void) {
 
     // --- Init state ---
     memset(&stats, 0, sizeof(stats));
+    dma_rx_epoch = 0;
+    dma_rx_total_read = 0;
     rx_read_idx = 0;
     tx_queue_head = 0;
     tx_queue_tail = 0;

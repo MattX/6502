@@ -259,14 +259,10 @@ static bool dispatch_rx_callback(void) {
     // the callback just processed may have been overwritten mid-read.
     uint32_t total_written_now = get_dma_rx_total_written();
     if (total_written_now - rx_transaction_total_read_start > BUS_DMA_RING_SIZE) {
-        printf("!!! RX BANKRUPTCY: DMA overran data during callback "
-               "(device %d, %d bytes) !!!\n",
+        printf("!!! FATAL: 6502 RX BANKRUPTCY: DMA overran data during callback "
+               "(device %d, %d bytes)\n",
                current_device, rx_transaction_len);
-        stats.rx_bankruptcies++;
-        proto_state = PROTO_IDLE;
-        dma_rx_read_idx = get_dma_rx_write_idx();
-        dma_rx_total_read = total_written_now;
-        return true;
+        for (;;) tight_loop_contents();
     }
 
     return false;
@@ -278,13 +274,9 @@ static void process_rx_data(void) {
     uint write_idx = get_dma_rx_write_idx();
 
     if (unread > BUS_DMA_RING_SIZE) {
-        printf("!!! RX DMA OVERRUN: %lu bytes lost\n",
+        printf("!!! FATAL: 6502 RX DMA OVERRUN: %lu bytes lost\n",
                (unsigned long)(unread - BUS_DMA_RING_SIZE));
-        stats.rx_dma_overruns++;
-        dma_rx_read_idx = write_idx;
-        dma_rx_total_read = total_written;
-        proto_state = PROTO_IDLE;
-        return;
+        for (;;) tight_loop_contents();
     }
 
     while (dma_rx_read_idx != write_idx) {

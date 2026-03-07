@@ -87,6 +87,7 @@ typedef struct {
     uint32_t tx_bytes;          // Total payload bytes sent via READ
     uint32_t requests;          // REQUEST commands handled
     uint32_t proto_errors;      // Protocol errors (bad CMD, etc.)
+    uint32_t rx_dma_overruns;   // RX DMA ring overruns (data lost)
 } spi_slave_stats_t;
 
 spi_slave_stats_t spi_slave_get_stats(void);
