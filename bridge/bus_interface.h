@@ -17,11 +17,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// Maximum number of devices (channels)
-#define BUS_MAX_DEVICES     8
-
-// Maximum TX buffer size per device
-#define BUS_MAX_BUFFER_SIZE 4096
+#include "bridge_defs.h"
 
 // RX callback: called when a complete write transaction is received.
 // |data| points into the DMA ring buffer and is only valid for the

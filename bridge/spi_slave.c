@@ -33,6 +33,7 @@
 #include "hardware/spi.h"
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
+#include "hardware/sync.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -52,17 +53,14 @@ static uint8_t __attribute__((aligned(SPI_SLAVE_RX_RING_SIZE)))
 // Software read pointer into rx_ring
 static volatile uint rx_read_idx = 0;
 
-// Snapshot of DMA write pointer at CS rising edge (set by ISR)
-static volatile uint rx_write_idx_snapshot = 0;
-static volatile bool rx_transaction_ready = false;
+// No snapshot needed — process_transaction reads the live DMA write pointer.
 
 // TX staging buffer (single buffer -- no double-buffering needed since
 // we only prepare it in the safe window between REQUEST and READ)
 static uint8_t tx_buf[SPI_SLAVE_READ_SIZE];
 
 // TX queue: data waiting to be sent to Zero (Pico -> Zero direction).
-#define TX_QUEUE_SIZE 4096
-static uint8_t tx_queue[TX_QUEUE_SIZE];
+static uint8_t tx_queue[SPI_TX_QUEUE_SIZE];
 static uint tx_queue_head = 0;
 static uint tx_queue_tail = 0;
 static uint tx_queue_len = 0;
@@ -111,7 +109,7 @@ static inline void ready_pin_deassert(void) {
 }
 
 static inline uint8_t tx_queue_peek(uint offset) {
-    return tx_queue[(tx_queue_head + offset) & (TX_QUEUE_SIZE - 1)];
+    return tx_queue[(tx_queue_head + offset) & (SPI_TX_QUEUE_SIZE - 1)];
 }
 
 // Drain exactly |count| bytes from tx_queue into dst.
@@ -119,7 +117,7 @@ static void tx_queue_drain(uint8_t *dst, uint count) {
     uint head = tx_queue_head;
     for (uint i = 0; i < count; i++) {
         dst[i] = tx_queue[head];
-        head = (head + 1) & (TX_QUEUE_SIZE - 1);
+        head = (head + 1) & (SPI_TX_QUEUE_SIZE - 1);
     }
     tx_queue_head = head;
     tx_queue_len -= count;
@@ -133,17 +131,11 @@ static void cs_rise_handler(uint gpio, uint32_t events) {
     (void)gpio;
     (void)events;
 
-    // Snapshot DMA write pointer
-    rx_write_idx_snapshot = get_dma_rx_write_idx();
-
     if (state == STATE_READY) {
         // READ just completed. Deassert READY.
         ready_pin_deassert();
         state = STATE_IDLE;
     }
-
-    // Signal main loop
-    rx_transaction_ready = true;
 }
 
 // ============================================================================
@@ -210,87 +202,93 @@ static void prepare_and_load_tx(void) {
     );
 
     // DMA is loaded. Assert READY -- master may now send READ.
+    // Disable interrupts to prevent cs_rise_handler from seeing STATE_READY
+    // before ready_pin_assert() completes.
+    uint32_t saved = save_and_disable_interrupts();
     state = STATE_READY;
     ready_pin_assert();
+    restore_interrupts(saved);
 }
 
 // ============================================================================
-// Process a completed transaction from the RX ring buffer
+// Process one complete transaction from the RX ring buffer.
+// Uses the live DMA write pointer so it's safe to call at any time.
+// Returns true if a transaction was consumed (caller should loop).
+// Returns false if no complete transaction is available yet.
 // ============================================================================
 
-static void process_transaction(void) {
+static bool process_transaction(void) {
     uint rd = rx_read_idx;
-    uint wr = rx_write_idx_snapshot;
+    uint wr = get_dma_rx_write_idx();
     uint avail = (wr - rd) & (SPI_SLAVE_RX_RING_SIZE - 1);
 
-    if (avail == 0) return;
+    if (avail == 0) return false;
 
     uint8_t cmd = rx_ring[rd];
-    rd = (rd + 1) & (SPI_SLAVE_RX_RING_SIZE - 1);
-    avail--;
 
     switch (cmd) {
         case SPI_CMD_WRITE: {
-            if (avail < 2) {
-                stats.proto_errors++;
-                break;
-            }
+            // Need at least 3 bytes (cmd + 2-byte length) to determine size.
+            if (avail < 3) return false;
 
-            uint8_t len_hi = rx_ring[rd];
-            rd = (rd + 1) & (SPI_SLAVE_RX_RING_SIZE - 1);
-            uint8_t len_lo = rx_ring[rd];
-            rd = (rd + 1) & (SPI_SLAVE_RX_RING_SIZE - 1);
-            avail -= 2;
-
+            uint8_t len_hi = rx_ring[(rd + 1) & (SPI_SLAVE_RX_RING_SIZE - 1)];
+            uint8_t len_lo = rx_ring[(rd + 2) & (SPI_SLAVE_RX_RING_SIZE - 1)];
             uint16_t payload_len = ((uint16_t)len_hi << 8) | len_lo;
 
-            if (payload_len > avail || payload_len > SPI_SLAVE_MAX_PAYLOAD) {
+            if (payload_len > SPI_SLAVE_MAX_PAYLOAD) {
                 stats.proto_errors++;
-                rd = wr;  // Discard
-                break;
+                rx_read_idx = wr;  // Discard up to current write pointer
+                return true;
             }
+
+            // Wait until all payload bytes have been written by DMA.
+            if (avail < 3 + (uint)payload_len) return false;
+
+            rd = (rd + 3) & (SPI_SLAVE_RX_RING_SIZE - 1);  // Skip cmd + len
 
             stats.rx_writes++;
             stats.rx_bytes += payload_len;
 
-            // Deliver payload via callback
             if (rx_callback && payload_len > 0) {
-                for (uint16_t i = 0; i < payload_len; i++) {
-                    rx_temp[i] = rx_ring[(rd + i) & (SPI_SLAVE_RX_RING_SIZE - 1)];
+                // Copy in up to two chunks (handles ring wrap)
+                uint16_t first = SPI_SLAVE_RX_RING_SIZE - rd;
+                if (first > payload_len) first = payload_len;
+                memcpy(rx_temp, &rx_ring[rd], first);
+                if (payload_len > first) {
+                    memcpy(rx_temp + first, rx_ring, payload_len - first);
                 }
                 rx_callback(rx_temp, payload_len);
             }
 
-            rd = (rd + payload_len) & (SPI_SLAVE_RX_RING_SIZE - 1);
-            break;
+            rx_read_idx = (rd + payload_len) & (SPI_SLAVE_RX_RING_SIZE - 1);
+            return true;
         }
 
         case SPI_CMD_REQUEST: {
             stats.requests++;
             state = STATE_REQUESTED;
-
-            // Deassert IRQ: the Zero is handling our data request now.
             irq_pin_deassert();
-            break;
+            rx_read_idx = (rd + 1) & (SPI_SLAVE_RX_RING_SIZE - 1);
+            return true;
         }
 
         case SPI_CMD_READ: {
-            // READ transaction completed. The CS rise handler already
-            // deasserted READY and moved state to IDLE.
+            // READ is a fixed-size transaction. Wait until all bytes are in
+            // the ring before consuming, so the bytes don't bleed into the
+            // next transaction's parsing.
+            if (avail < SPI_SLAVE_READ_SIZE) return false;
+            // CS rise handler already deasserted READY and set state=IDLE.
             stats.tx_reads++;
-            // Skip all received bytes (0x03 + dummy padding)
-            rd = wr;
-            break;
+            rx_read_idx = (rd + SPI_SLAVE_READ_SIZE) & (SPI_SLAVE_RX_RING_SIZE - 1);
+            return true;
         }
 
         default: {
             stats.proto_errors++;
-            rd = wr;
-            break;
+            rx_read_idx = wr;
+            return true;
         }
     }
-
-    rx_read_idx = rd;
 }
 
 // ============================================================================
@@ -331,7 +329,7 @@ bool spi_slave_init(void) {
     channel_config_set_dreq(&rx_config, spi_get_dreq(SPI_SLAVE_SPI, false));
 
     // TRIGGER_SELF mode for endless operation
-    uint32_t trans_count = SPI_SLAVE_RX_RING_SIZE | (1u << 28);
+    uint32_t trans_count = SPI_SLAVE_RX_RING_SIZE | DMA_TRANS_COUNT_MODE_TRIGGER_SELF;
 
     dma_channel_configure(
         dma_rx_chan,
@@ -369,20 +367,30 @@ void spi_slave_set_rx_callback(spi_slave_rx_callback_t cb) {
     rx_callback = cb;
 }
 
+uint spi_slave_tx_queue_free(void) {
+    return SPI_TX_QUEUE_SIZE - tx_queue_len;
+}
+
 bool spi_slave_tx_queue(const uint8_t *data, uint16_t len) {
     if (len == 0) return true;
-    if (len > TX_QUEUE_SIZE - tx_queue_len) return false;
+    if (len > SPI_TX_QUEUE_SIZE - tx_queue_len) return false;
 
     uint tail = tx_queue_tail;
     for (uint16_t i = 0; i < len; i++) {
         tx_queue[tail] = data[i];
-        tail = (tail + 1) & (TX_QUEUE_SIZE - 1);
+        tail = (tail + 1) & (SPI_TX_QUEUE_SIZE - 1);
     }
     tx_queue_tail = tail;
     tx_queue_len += len;
 
-    // Assert IRQ if not already in a REQUEST/READ cycle
-    if (state == STATE_IDLE) {
+    // Assert IRQ if not already in a REQUEST/READ cycle.
+    // Read state with interrupts disabled to avoid racing with cs_rise_handler.
+    uint32_t saved = save_and_disable_interrupts();
+    bool should_assert = (state == STATE_IDLE);
+    restore_interrupts(saved);
+    printf("spi_enqueue: +%d total=%d state=%d irq=%d\n",
+           len, tx_queue_len, (int)state, (int)should_assert);
+    if (should_assert) {
         irq_pin_assert();
     }
 
@@ -390,11 +398,8 @@ bool spi_slave_tx_queue(const uint8_t *data, uint16_t len) {
 }
 
 void spi_slave_task(void) {
-    // Process any completed transaction
-    if (rx_transaction_ready) {
-        rx_transaction_ready = false;
-        process_transaction();
-    }
+    // Drain all complete transactions from the RX ring.
+    while (process_transaction());
 
     // If REQUEST was received, prepare TX and assert READY
     if (state == STATE_REQUESTED) {
@@ -404,6 +409,7 @@ void spi_slave_task(void) {
     // After a READ completes (state returned to IDLE), check if more data
     // is queued and re-assert IRQ if so
     if (state == STATE_IDLE && tx_queue_len > 0) {
+        printf("spi_task: re-assert IRQ, queue=%d\n", tx_queue_len);
         irq_pin_assert();
     }
 }

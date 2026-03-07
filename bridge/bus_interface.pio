@@ -31,8 +31,8 @@
 
 .wrap_target
 wait_cycle:
-    wait 1 gpio PIN_PHI2 [18]   ; 1 - Wait for PHI2 to go high,
-                                 ; then wait at least 6 cycles (40ns) for the 6502's tMDS
+    wait 1 gpio PIN_PHI2 [18]   ; 1 - Wait for PHI2 to go high + 18 extra cycles
+                                 ; (~127ns at 150MHz) for 6502 address/data setup (tMDS)
 
     ; Read all pins: GPIO 0-29 into ISR (left shift: ISR[i] = GPIO[i])
     in pins, 30                 ; 2
@@ -113,6 +113,8 @@ static inline void bus_interface_program_init(PIO pio, uint sm, uint offset) {
     gpio_set_dir(BUS_PIN_CS_N, GPIO_IN);
     gpio_set_pulls(BUS_PIN_CS_N, true, false);  // Pull-up (deselected by default)
 
+    // Disabled because Phi2 is being driven by the Pico's PWM.
+    // Enable if Phi2 is provided by an external source instead.
     // gpio_init(BUS_PIN_PHI2);
     // gpio_set_dir(BUS_PIN_PHI2, GPIO_IN);
     // gpio_set_pulls(BUS_PIN_PHI2, false, false);

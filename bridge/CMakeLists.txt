@@ -51,6 +51,12 @@ target_link_libraries(bridge PUBLIC
     hardware_pwm
 )
 
+# Debug output option
+option(BRIDGE_DEBUG "Enable verbose protocol debug output (impacts throughput)" OFF)
+if(BRIDGE_DEBUG)
+    target_compile_definitions(bridge PRIVATE BRIDGE_DEBUG=1)
+endif()
+
 # Create map/bin/hex/uf2 files
 pico_add_extra_outputs(bridge)
 

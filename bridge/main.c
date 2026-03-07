@@ -23,14 +23,6 @@
 #include "bus_interface.h"
 #include "spi_slave.h"
 
-// 6502 PHI2 clock output pin (PWM)
-#define PIN_6502_PHI2 2
-// 6502 IRQ pin (active-low output)
-#define PIN_6502_IRQ 3
-
-// Target clock frequency for the 6502.
-#define CLK_SPEED_6502 1000000  // 1 MHz target clock frequency for 6502
-
 // Stats
 static uint32_t bus_to_spi_msgs = 0;
 static uint32_t bus_to_spi_bytes = 0;
@@ -68,11 +60,15 @@ static void bus_to_spi_callback(uint8_t device, const uint8_t *data, uint16_t le
     // Bus transfers are max 255 bytes, so len fits in uint8_t
     uint8_t header[2] = { device, (uint8_t)len };
 
-    // Queue header + payload (both calls are in main-loop context, no preemption)
-    if (!spi_slave_tx_queue(header, 2) || !spi_slave_tx_queue(data, len)) {
-        // TX queue full -- data lost
+    // Check space upfront to avoid orphaning a header in the queue
+    uint free = spi_slave_tx_queue_free();
+    printf("bus->spi: dev=%d len=%d free=%d\n", device, len, free);
+    if (free < len + 2) {
+        printf("bus->spi: queue full, dropping\n");
         return;
     }
+    spi_slave_tx_queue(header, 2);
+    spi_slave_tx_queue(data, len);
 
     bus_to_spi_msgs++;
     bus_to_spi_bytes += len;
@@ -87,17 +83,17 @@ static void spi_rx_callback(const uint8_t *data, uint16_t len) {
     while (pos + 2 <= len) {
         uint8_t device = data[pos];
         uint8_t tlv_len = data[pos + 1];
-        printf("SPI RX: device=%d, tlv_len=%d\n", device, tlv_len);
+        DBG_PRINTF("SPI RX: device=%d, tlv_len=%d\n", device, tlv_len);
         if (pos + 2 + tlv_len > len) break;
         if (device > 0 && device < BUS_MAX_DEVICES && tlv_len > 0) {
             uint16_t written = bus_device_write(device, &data[pos + 2], tlv_len);
-            if (device == 7)
-                printf("dev7 after spi_rx: written=%d, buf_count=%d\n", written, bus_device_tx_count(7));
+            DBG_PRINTF("dev%d after spi_rx: written=%d, buf_count=%d\n",
+                        device, written, bus_device_tx_count(device));
             if (written < tlv_len) {
                 spi_to_bus_drops++;
             }
             spi_to_bus_msgs++;
-            spi_to_bus_bytes += tlv_len;
+            spi_to_bus_bytes += written;
         }
         pos += 2 + tlv_len;
     }
@@ -162,7 +158,7 @@ void setup_6502_clock() {
 
 int main(void) {
     stdio_init_all();
-    sleep_ms(2000);
+    sleep_ms(STARTUP_DELAY_MS);
 
     printf("\n6502 <-> Zero SPI Bridge\n");
     printf("  6502 bus: GPIO 0-2 (ctrl), 6-13 (data)\n");
@@ -212,7 +208,7 @@ int main(void) {
 
         // Periodic stats
         uint32_t now = to_ms_since_boot(get_absolute_time());
-        if (now - last_stats >= 5000) {
+        if (now - last_stats >= STATS_INTERVAL_MS) {
             bus_stats_t bs = bus_get_stats();
             spi_slave_stats_t ss = spi_slave_get_stats();
 

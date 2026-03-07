@@ -6,13 +6,13 @@
  * Three commands: WRITE (Zero->Pico), REQUEST (ask Pico to prepare),
  * READ (fetch Pico's response after READY).
  *
- * Pin assignments (SPI0, chosen to avoid 6502 bus GPIOs 0-2, 6-13):
+ * Pin assignments (SPI0, chosen to avoid 6502 bus GPIOs 0-13):
  *   GPIO 16 = SPI0 RX  (MOSI from Zero)
  *   GPIO 17 = SPI0 CSn (directly usable as SPI0_CS_n)
  *   GPIO 18 = SPI0 SCK (clock from Zero)
  *   GPIO 19 = SPI0 TX  (MISO to Zero)
- *   GPIO 20 = IRQ       (active-low output, "I have data")
- *   GPIO 21 = READY     (active-low output, "TX DMA loaded, safe to READ")
+ *   GPIO 20 = IRQ      (active-low output, "I have data")
+ *   GPIO 21 = READY    (active-low output, "TX DMA loaded, safe to READ")
  */
 
 #ifndef SPI_SLAVE_H
@@ -20,6 +20,8 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+
+#include "bridge_defs.h"
 
 // --- Protocol constants (must match Zero side) ---
 
@@ -46,10 +48,16 @@
 #define SPI_SLAVE_RX_RING_BITS  13              // 2^13 = 8192 bytes
 #define SPI_SLAVE_RX_RING_SIZE  (1 << SPI_SLAVE_RX_RING_BITS)
 
+_Static_assert((SPI_SLAVE_RX_RING_SIZE & (SPI_SLAVE_RX_RING_SIZE - 1)) == 0,
+               "SPI_SLAVE_RX_RING_SIZE must be a power of two");
+
 // --- API ---
 
 // Initialize SPI slave hardware, DMA, and GPIO.
 bool spi_slave_init(void);
+
+// Returns the number of free bytes in the TX queue.
+uint spi_slave_tx_queue_free(void);
 
 // Queue data for the Zero to READ. Copies data into internal TX queue.
 // Returns false if the TX queue is full.

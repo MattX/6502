@@ -15,6 +15,9 @@
 #include "bus_interface.h"
 #include "bus_interface.pio.h"
 
+_Static_assert(BUS_PIN_PHI2 == PIN_6502_PHI2,
+               "PHI2 pin mismatch between PIO (bus_interface.pio) and bridge_defs.h");
+
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
 #include "hardware/dma.h"
@@ -33,41 +36,17 @@ static int dma_rx_chan = -1;
 static int dma_tx_chan = -1;
 
 // DMA RX ring buffer
-#define DMA_BUFFER_RING_BITS 15    // 2^15 = 32768
-#define DMA_BUFFER_SIZE      (1 << DMA_BUFFER_RING_BITS)
-static uint8_t __attribute__((aligned(DMA_BUFFER_SIZE))) dma_rx_buffer[DMA_BUFFER_SIZE];
+static uint8_t __attribute__((aligned(BUS_DMA_RING_SIZE))) dma_rx_buffer[BUS_DMA_RING_SIZE];
 static volatile uint dma_rx_read_idx = 0;
 static uint32_t dma_rx_total_read = 0;
 
-/*
- * RP2350 DMA TRANS_COUNT register layout (different from RP2040!):
- *   Bits [31:28] = MODE   (4 bits)
- *   Bits [27:0]  = COUNT  (28 bits, max 0x0FFFFFFF)
- *
- * MODE values:
- *   0x0 = NORMAL       - count decrements, channel stops at 0
- *   0x1 = TRIGGER_SELF - count decrements, channel re-triggers at 0
- *   0xF = ENDLESS      - count NEVER decrements (runs forever)
- *
- * IMPORTANT: do NOT use ENDLESS mode (e.g. trans_count = 0xFFFFFFFF).
- * In ENDLESS mode transfer_count never changes, making it impossible to
- * track how many bytes DMA has written - which breaks overrun detection.
- *
- * We use TRIGGER_SELF mode (MODE=1) with COUNT=DMA_BUFFER_SIZE.  DMA
- * counts down each byte transfer and re-triggers itself at 0, running
- * forever.  Each re-trigger fires a DMA IRQ that increments an epoch
- * counter.  Total bytes written = epoch * DMA_BUFFER_SIZE + consumed,
- * giving reliable overrun detection.
- */
-#define DMA_TRANS_COUNT_MODE_TRIGGER_SELF (1u << 28)
-#define DMA_TRANS_COUNT_COUNT_MASK       0x0FFFFFFFu
-
 // Epoch counter: incremented by DMA IRQ each time the transfer count
-// wraps (every DMA_BUFFER_SIZE bytes).  Volatile because it's written
+// wraps (every BUS_DMA_RING_SIZE bytes).  Volatile because it's written
 // from the IRQ handler and read from the main loop.
 static volatile uint32_t dma_rx_epoch = 0;
 
-// One-shot TX DMA staging buffer (each byte widened to a 32-bit word)
+// One-shot TX DMA staging buffer.  Each byte is widened to a 32-bit word
+// because PIO TX FIFO entries are 32 bits and DMA uses DMA_SIZE_32.
 static uint32_t tx_staging[256];
 
 // Per-device TX buffers (MCU -> CPU)
@@ -161,14 +140,14 @@ static void setup_dma(void) {
     channel_config_set_transfer_data_size(&rx_config, DMA_SIZE_8);
     channel_config_set_read_increment(&rx_config, false);
     channel_config_set_write_increment(&rx_config, true);
-    channel_config_set_ring(&rx_config, true, DMA_BUFFER_RING_BITS);
+    channel_config_set_ring(&rx_config, true, BUS_DMA_RING_BITS);
     channel_config_set_dreq(&rx_config, pio_get_dreq(bus_pio, bus_sm, false));
     channel_config_set_high_priority(&rx_config, true);
 
-    // Use TRIGGER_SELF mode: DMA counts down DMA_BUFFER_SIZE transfers,
+    // Use TRIGGER_SELF mode: DMA counts down BUS_DMA_RING_SIZE transfers,
     // then re-triggers itself (endless operation).  Each re-trigger fires
     // an IRQ so we can track total bytes via an epoch counter.
-    uint32_t trans_count = DMA_BUFFER_SIZE | DMA_TRANS_COUNT_MODE_TRIGGER_SELF;
+    uint32_t trans_count = BUS_DMA_RING_SIZE | DMA_TRANS_COUNT_MODE_TRIGGER_SELF;
 
     dma_channel_configure(
         dma_rx_chan,
@@ -180,7 +159,7 @@ static void setup_dma(void) {
     );
 
     // DMA IRQ: fires each time transfer count reaches 0 (every
-    // DMA_BUFFER_SIZE bytes).  We use this to maintain the epoch counter
+    // BUS_DMA_RING_SIZE bytes).  We use this to maintain the epoch counter
     // for total-bytes-written tracking.
     dma_channel_set_irq0_enabled(dma_rx_chan, true);
     irq_set_exclusive_handler(DMA_IRQ_0, dma_rx_irq_handler);
@@ -192,7 +171,7 @@ static void setup_dma(void) {
 }
 
 // DMA IRQ handler: called each time the transfer count reaches 0 and the
-// channel re-triggers.  This happens every DMA_BUFFER_SIZE bytes.
+// channel re-triggers.  This happens every BUS_DMA_RING_SIZE bytes.
 static void __isr dma_rx_irq_handler(void) {
     dma_channel_acknowledge_irq0(dma_rx_chan);
     dma_rx_epoch++;
@@ -223,7 +202,7 @@ static inline uint get_dma_rx_write_idx(void) {
 
 // Compute total bytes written by DMA since start.
 //
-// total = epoch * DMA_BUFFER_SIZE + (DMA_BUFFER_SIZE - remaining)
+// total = epoch * BUS_DMA_RING_SIZE + (BUS_DMA_RING_SIZE - remaining)
 //
 // Two race conditions to handle:
 //
@@ -232,11 +211,11 @@ static inline uint get_dma_rx_write_idx(void) {
 //    epoch after transfer_count and retrying if it changed.
 //
 // 2) Re-trigger latency: when DMA re-triggers, transfer_count resets
-//    to DMA_BUFFER_SIZE instantly (hardware), but the epoch IRQ hasn't
+//    to BUS_DMA_RING_SIZE instantly (hardware), but the epoch IRQ hasn't
 //    fired yet (~80ns latency).  Reading during this window gives the
 //    OLD epoch with the NEW (reset) count, making total appear one
-//    DMA_BUFFER_SIZE too low.  Detected because total must never be
-//    less than dma_rx_total_read; corrected by adding DMA_BUFFER_SIZE.
+//    BUS_DMA_RING_SIZE too low.  Detected because total must never be
+//    less than dma_rx_total_read; corrected by adding BUS_DMA_RING_SIZE.
 static inline uint32_t get_dma_rx_total_written(void) {
     uint32_t epoch, remaining;
     do {
@@ -246,9 +225,9 @@ static inline uint32_t get_dma_rx_total_written(void) {
                     & DMA_TRANS_COUNT_COUNT_MASK;
         __compiler_memory_barrier();
     } while (epoch != dma_rx_epoch);
-    uint32_t total = epoch * DMA_BUFFER_SIZE + (DMA_BUFFER_SIZE - remaining);
-    if ((int32_t)(total - dma_rx_total_read) < 0) {
-        total += DMA_BUFFER_SIZE;
+    uint32_t total = epoch * BUS_DMA_RING_SIZE + (BUS_DMA_RING_SIZE - remaining);
+    if (total < dma_rx_total_read) {
+        total += BUS_DMA_RING_SIZE;
     }
     return total;
 }
@@ -260,12 +239,12 @@ static bool dispatch_rx_callback(void) {
     if (!cb) return false;
 
     const uint8_t *data;
-    if (rx_transaction_start_idx + rx_transaction_len <= DMA_BUFFER_SIZE) {
+    if (rx_transaction_start_idx + rx_transaction_len <= BUS_DMA_RING_SIZE) {
         // Contiguous in the ring - point directly into DMA buffer
         data = &dma_rx_buffer[rx_transaction_start_idx];
     } else {
         // Wraps around the ring boundary - assemble contiguous copy
-        uint16_t first = DMA_BUFFER_SIZE - rx_transaction_start_idx;
+        uint16_t first = BUS_DMA_RING_SIZE - rx_transaction_start_idx;
         memcpy(rx_transaction_buf,
                &dma_rx_buffer[rx_transaction_start_idx], first);
         memcpy(rx_transaction_buf + first,
@@ -279,7 +258,7 @@ static bool dispatch_rx_callback(void) {
     // buffer since we started reading this transaction's data, the bytes
     // the callback just processed may have been overwritten mid-read.
     uint32_t total_written_now = get_dma_rx_total_written();
-    if (total_written_now - rx_transaction_total_read_start > DMA_BUFFER_SIZE) {
+    if (total_written_now - rx_transaction_total_read_start > BUS_DMA_RING_SIZE) {
         printf("!!! RX BANKRUPTCY: DMA overran data during callback "
                "(device %d, %d bytes) !!!\n",
                current_device, rx_transaction_len);
@@ -298,7 +277,9 @@ static void process_rx_data(void) {
     uint32_t unread = total_written - dma_rx_total_read;
     uint write_idx = get_dma_rx_write_idx();
 
-    if (unread > DMA_BUFFER_SIZE) {
+    if (unread > BUS_DMA_RING_SIZE) {
+        printf("!!! RX DMA OVERRUN: %lu bytes lost\n",
+               (unsigned long)(unread - BUS_DMA_RING_SIZE));
         stats.rx_dma_overruns++;
         dma_rx_read_idx = write_idx;
         dma_rx_total_read = total_written;
@@ -308,13 +289,12 @@ static void process_rx_data(void) {
 
     while (dma_rx_read_idx != write_idx) {
         uint8_t byte = dma_rx_buffer[dma_rx_read_idx];
-        dma_rx_read_idx = (dma_rx_read_idx + 1) % DMA_BUFFER_SIZE;
+        dma_rx_read_idx = (dma_rx_read_idx + 1) & (BUS_DMA_RING_SIZE - 1);
         dma_rx_total_read++;
         stats.rx_bytes++;
 
-        if (((byte & 0x7F) == 7 || current_device == 7) &&
-            (proto_state == PROTO_IDLE || proto_state == PROTO_SENDING))
-            printf("RX byte=0x%02x state=%d\n", byte, proto_state);
+        DBG_PRINTF("RX byte=0x%02x dev=%d state=%d\n", byte,
+                   byte & 0x7F, proto_state);
 
         switch (proto_state) {
             case PROTO_IDLE:
@@ -383,6 +363,24 @@ static void process_rx_data(void) {
     }
 }
 
+// Start a one-shot DMA transfer from tx_staging to PIO TX FIFO.
+static void start_tx_dma(uint count) {
+    dma_channel_config tx_config = dma_channel_get_default_config(dma_tx_chan);
+    channel_config_set_transfer_data_size(&tx_config, DMA_SIZE_32);
+    channel_config_set_read_increment(&tx_config, true);
+    channel_config_set_write_increment(&tx_config, false);
+    channel_config_set_dreq(&tx_config, pio_get_dreq(bus_pio, bus_sm, true));
+
+    dma_channel_configure(
+        dma_tx_chan,
+        &tx_config,
+        &bus_pio->txf[bus_sm],
+        tx_staging,
+        count,
+        true  // Start immediately
+    );
+}
+
 static void feed_tx_fifo(void) {
     // Check if a previous one-shot DMA has completed
     if (proto_state == PROTO_SENDING && !dma_channel_is_busy(dma_tx_chan)) {
@@ -404,40 +402,24 @@ static void feed_tx_fifo(void) {
             }
         } else {
             device_buffer_t *buf = &device_tx_buffers[pending_read_device];
-            if (pending_read_device == 7)
-                printf("dev7 buf: count=%d head=%d tail=%d\n", buf->count, buf->head, buf->tail);
+            DBG_PRINTF("dev%d buf: count=%d head=%d tail=%d\n",
+                       pending_read_device, buf->count, buf->head, buf->tail);
             if (buf->count > 0) {
                 len = (buf->count > 254) ? 254 : buf->count;
                 tx_staging[0] = (uint32_t)len;
                 for (uint16_t i = 0; i < len; i++) {
                     tx_staging[1 + i] = (uint32_t)buf->data[buf->tail];
-                    buf->tail = (buf->tail + 1) % BUS_MAX_BUFFER_SIZE;
+                    buf->tail = (buf->tail + 1) & (BUS_MAX_BUFFER_SIZE - 1);
                     buf->count--;
                 }
             }
         }
 
-        printf("TX to bus, device=%d, len=%d\n", pending_read_device, len);
+        DBG_PRINTF("TX to bus, device=%d, len=%d\n", pending_read_device, len);
 
         if (len > 0) {
             stats.tx_bytes += len;
-
-            // Configure and start one-shot DMA transfer
-            dma_channel_config tx_config = dma_channel_get_default_config(dma_tx_chan);
-            channel_config_set_transfer_data_size(&tx_config, DMA_SIZE_32);
-            channel_config_set_read_increment(&tx_config, true);
-            channel_config_set_write_increment(&tx_config, false);
-            channel_config_set_dreq(&tx_config, pio_get_dreq(bus_pio, bus_sm, true));
-
-            dma_channel_configure(
-                dma_tx_chan,
-                &tx_config,
-                &bus_pio->txf[bus_sm],
-                tx_staging,
-                len + 1,
-                true  // Start immediately
-            );
-
+            start_tx_dma(len + 1);
             proto_state = PROTO_SENDING;
             pending_read_request = false;
             read_underflow_recorded = false;
@@ -445,22 +427,7 @@ static void feed_tx_fifo(void) {
             // No data available - send length=0 so the 6502 can move on
             // (otherwise it polls 0xFF forever)
             tx_staging[0] = 0;
-
-            dma_channel_config tx_config = dma_channel_get_default_config(dma_tx_chan);
-            channel_config_set_transfer_data_size(&tx_config, DMA_SIZE_32);
-            channel_config_set_read_increment(&tx_config, true);
-            channel_config_set_write_increment(&tx_config, false);
-            channel_config_set_dreq(&tx_config, pio_get_dreq(bus_pio, bus_sm, true));
-
-            dma_channel_configure(
-                dma_tx_chan,
-                &tx_config,
-                &bus_pio->txf[bus_sm],
-                tx_staging,
-                1,
-                true
-            );
-
+            start_tx_dma(1);
             proto_state = PROTO_SENDING;
             pending_read_request = false;
             if (!read_underflow_recorded) {
@@ -477,10 +444,14 @@ uint16_t bus_device_write(uint8_t device, const uint8_t *data, uint16_t len) {
     uint16_t space = BUS_MAX_BUFFER_SIZE - buf->count;
     uint16_t to_write = (len < space) ? len : space;
 
-    for (uint16_t i = 0; i < to_write; i++) {
-        buf->data[buf->head] = data[i];
-        buf->head = (buf->head + 1) % BUS_MAX_BUFFER_SIZE;
+    // Copy in up to two chunks (handles ring wrap)
+    uint16_t first = BUS_MAX_BUFFER_SIZE - buf->head;
+    if (first > to_write) first = to_write;
+    memcpy(&buf->data[buf->head], data, first);
+    if (to_write > first) {
+        memcpy(buf->data, data + first, to_write - first);
     }
+    buf->head = (buf->head + to_write) & (BUS_MAX_BUFFER_SIZE - 1);
     buf->count += to_write;
 
     return to_write;
