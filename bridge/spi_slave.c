@@ -425,6 +425,10 @@ uint spi_slave_tx_queue_free(void) {
     return SPI_TX_QUEUE_SIZE - tx_queue_len;
 }
 
+uint spi_slave_tx_queue_len(void) {
+    return tx_queue_len;
+}
+
 bool spi_slave_tx_queue(const uint8_t *data, uint16_t len) {
     if (len == 0) return true;
     if (len > SPI_TX_QUEUE_SIZE - tx_queue_len) return false;

@@ -18,6 +18,7 @@
 
 #define PIN_6502_PHI2   2       // PHI2 clock output (PWM)
 #define PIN_6502_IRQ    3       // IRQ to 6502 (active-low, open-drain)
+#define PIN_6502_RESB   4       // RESB to 6502 (active-low, open-drain)
 
 // ============================================================================
 // Clock configuration

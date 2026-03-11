@@ -49,6 +49,7 @@ target_link_libraries(bridge PUBLIC
     hardware_spi
     hardware_irq
     hardware_pwm
+    hardware_watchdog
 )
 
 # Debug output option

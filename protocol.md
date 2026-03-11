@@ -65,7 +65,7 @@ set up the DMA channel.
 | ID | Name | Description |
 |----|------|-------------|
 | 0 | Status | Handled on the Pico itself. Returns a byte with each bit set if the corresponding device has data. Second byte is 1 if the Zero is connected. Device 0 is also used for Pico -> Zero communication in case of error; errors are sent as plain strings. |
-| 1 | Reserved | Later: system control. Soft shutdown and reset? Clock control? |
+| 1 | System | Handled on Pico. Writing any data triggers a system reset. |
 | 2 | Video / Keyboard | Writes go to video, reads come from keyboard. |
 | 3 | Netboot | Downloads program from Zero. |
 | 4 | Network | |
@@ -309,6 +309,121 @@ Zero                                    Pico
   |                                       |
   |  Synchronized. Normal operation.      |
 ```
+
+### Reset
+
+Three events can trigger a system reset:
+
+1. **Power-on**: External RC circuit or supervisory IC (e.g., DS1813) holds
+   RESB low. The Pico boots, takes over holding RESB via open-drain,
+   completes initialization, then releases RESB.
+2. **Pushbutton**: External button pulls RESB low. The Pico detects the
+   falling edge via GPIO interrupt.
+3. **Soft reset**: The 6502 writes any data to Device 1.
+
+For pushbutton and soft reset, the Pico:
+
+1. Drives RESB low (open-drain)
+2. Sends a reset notification TLV to the Zero over SPI
+3. Waits for the Zero to read the notification (or times out after 1s)
+4. Holds RESB low for 500ms to discharge the external RC cap
+5. Triggers a watchdog reboot
+
+The Pico then reboots as if from power-on: drives RESB low on startup,
+initializes all subsystems, and releases RESB when ready. PHI2 (PWM)
+stops during reboot; this is harmless because the W65C02S is fully static
+and remains in reset (RESB is held low by the RC circuit).
+
+#### RESB Pin
+
+GPIO 4. Open-drain, active low:
+- Input mode (default) = released. External pull-up holds RESB high.
+- Output low = asserted. Pico drives RESB low.
+
+The same open-drain pattern as the 6502 IRQ pin. An external reset
+generator can be substituted with no protocol changes.
+
+#### Reset Notification (Pico -> Zero)
+
+Before rebooting, the Pico sends a reset notification to the Zero over
+the existing SPI link:
+
+```
+Device 0, length 1, data: 'R' (0x52)
+```
+
+This is a standard TLV on Device 0 (the status/error channel). The Pico
+waits for the Zero to read the notification (TX queue drains) before
+rebooting, with a 1-second timeout.
+
+The Zero handles the notification by clearing all TX queues, resetting
+terminal state, and setting buffer estimates to full capacity (the Pico
+is guaranteed to have empty buffers after rebooting).
+
+On power-on, no notification is sent (the Zero isn't running yet). The
+existing startup handshake handles this case.
+
+#### Reset Sequence
+
+```
+6502                Pico                     Zero
+ |                   |                        |
+ |      RESB goes low (external or Pico)      |
+ |  <-- RESB low --- |                        |
+ |  (enters reset)   |                        |
+ |                   |                        |
+ |                   | -- reset TLV --------> |
+ |                   |    (Device 0, 'R')     |
+ |                   |                        | clears TX queues
+ |                   |                        | resets terminal
+ |                   |                        | sets BUF to max
+ |                   |                        |
+ |                   | <-- Zero reads TLV --- |
+ |                   | (TX queue drained)     |
+ |                   |                        |
+ |                   | hold RESB 500ms        |
+ |                   | (RC cap discharges)    |
+ |                   |                        |
+ |                   | watchdog reboot        |
+ |                   | (PHI2 stops, GPIOs     |
+ |                   |  float, RC holds RESB) |
+ |                   |                        |
+ |                   | --- Pico boots ---     |
+ |                   | drives RESB low        |
+ |                   | starts PWM (PHI2)      |
+ |                   | inits PIO, DMA, SPI    |
+ |                   | asserts IRQ            |
+ |                   |                        |
+ |                   |                        | sees IRQ
+ |                   | <== REQUEST ========== |
+ |                   | === READY ===========> |
+ |                   | <== READ ============= |
+ |                   |    (BUF, LEN=0)        |
+ |                   |                        | re-synced
+ |                   |                        |
+ |  <-- RESB high -- |                        |
+ |  (reads $FFFC/D)  |                        |
+ |  (jumps to ROM)   |                        |
+ |                   |                        |
+ |  polls Device 0   |                        |
+ |  byte 1 = 0       |                        |
+ |  ...              |                        |
+ |  byte 1 = 1       |  (SPI connected)       |
+ |  (proceeds)       |                        |
+```
+
+#### After Reset
+
+After RESB goes high, the 6502 reads its reset vector ($FFFC/$FFFD) and
+jumps to ROM. The ROM bootloader polls Device 0:
+
+- Byte 0: device data availability bitmask
+- Byte 1: 1 if the Zero is connected (at least one SPI transaction
+  completed), 0 otherwise
+
+The 6502 loops until byte 1 is 1, then proceeds (e.g., netboot via
+Device 3). This polling approach requires no IRQ handling and is robust
+against the Zero taking an arbitrary amount of time to boot.
 
 ### Transaction Flows
 

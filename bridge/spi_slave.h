@@ -59,6 +59,9 @@ bool spi_slave_init(void);
 // Returns the number of free bytes in the TX queue.
 uint spi_slave_tx_queue_free(void);
 
+// Returns the number of bytes currently in the TX queue.
+uint spi_slave_tx_queue_len(void);
+
 // Queue data for the Zero to READ. Copies data into internal TX queue.
 // Returns false if the TX queue is full.
 // If IRQ is not already asserted, this will assert it.
