@@ -65,7 +65,7 @@ set up the DMA channel.
 | ID | Name | Description |
 |----|------|-------------|
 | 0 | Status | Handled on the Pico itself. Returns a byte with each bit set if the corresponding device has data. Second byte is 1 if the Zero is connected. Device 0 is also used for Pico -> Zero communication in case of error; errors are sent as plain strings. |
-| 1 | System | Handled on Pico. Writing any data triggers a system reset. |
+| 1 | System | Handled on Pico. 6502 writes trigger a system reset. Pico sends reset notification (`'R'`) to Zero before rebooting. |
 | 2 | Video / Keyboard | Writes go to video, reads come from keyboard. |
 | 3 | Netboot | Downloads program from Zero. |
 | 4 | Network | |
@@ -349,10 +349,10 @@ Before rebooting, the Pico sends a reset notification to the Zero over
 the existing SPI link:
 
 ```
-Device 0, length 1, data: 'R' (0x52)
+Device 1, length 1, data: 'R' (0x52)
 ```
 
-This is a standard TLV on Device 0 (the status/error channel). The Pico
+This is a standard TLV on Device 1 (system control). The Pico
 waits for the Zero to read the notification (TX queue drains) before
 rebooting, with a 1-second timeout.
 
@@ -373,7 +373,7 @@ existing startup handshake handles this case.
  |  (enters reset)   |                        |
  |                   |                        |
  |                   | -- reset TLV --------> |
- |                   |    (Device 0, 'R')     |
+ |                   |    (Device 1, 'R')     |
  |                   |                        | clears TX queues
  |                   |                        | resets terminal
  |                   |                        | sets BUF to max

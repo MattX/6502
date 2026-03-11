@@ -196,7 +196,7 @@ static void bridge_reset(void) {
     gpio_set_dir(PIN_6502_RESB, GPIO_OUT);  // Drive low
 
     // Notify Zero via SPI (SPI is still running).
-    uint8_t reset_msg[] = { 0x00, 0x01, 'R' };  // Device 0, len 1, 'R'
+    uint8_t reset_msg[] = { 0x01, 0x01, 'R' };  // Device 1 (system), len 1, 'R'
     spi_slave_tx_queue(reset_msg, sizeof(reset_msg));
 
     // Keep running the SPI slave task until the Zero has read the

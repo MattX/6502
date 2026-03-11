@@ -145,11 +145,6 @@ impl App {
     fn dispatch_rx(&mut self, device: u8, data: &[u8]) {
         match device {
             0 => {
-                // Reset notification from Pico
-                if data == b"R" {
-                    self.handle_pico_reset();
-                    return;
-                }
                 // Status device
                 if !data.is_empty() {
                     self.status.device_status = data[0];
@@ -158,6 +153,12 @@ impl App {
                     // Error string from Pico
                     let msg = String::from_utf8_lossy(&data[1..]);
                     self.log(format!("Pico: {msg}"));
+                }
+            }
+            1 => {
+                // System control: reset notification from Pico
+                if data == b"R" {
+                    self.handle_pico_reset();
                 }
             }
             2 => {
@@ -262,7 +263,7 @@ impl App {
     }
 
     /// Handle a reset notification from the Pico.
-    /// The Pico sends Device 0, data='R' before rebooting.
+    /// The Pico sends Device 1 (system control), data='R' before rebooting.
     fn handle_pico_reset(&mut self) {
         self.log("Pico reset — re-syncing".to_string());
 
