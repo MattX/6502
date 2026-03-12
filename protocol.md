@@ -314,8 +314,8 @@ Zero                                    Pico
 
 Three events can trigger a system reset:
 
-1. **Power-on**: External RC circuit or supervisory IC (e.g., DS1813) holds
-   RESB low. The Pico boots, takes over holding RESB via open-drain,
+1. **Power-on**: External supervisory IC (e.g., DS1813) or pull-up with
+   pushbutton holds RESB. The Pico boots, drives RESB low via open-drain,
    completes initialization, then releases RESB.
 2. **Pushbutton**: External button pulls RESB low. The Pico detects the
    falling edge via GPIO interrupt.
@@ -326,13 +326,13 @@ For pushbutton and soft reset, the Pico:
 1. Drives RESB low (open-drain)
 2. Sends a reset notification TLV to the Zero over SPI
 3. Waits for the Zero to read the notification (or times out after 1s)
-4. Holds RESB low for 500ms to discharge the external RC cap
-5. Triggers a watchdog reboot
+4. Triggers a watchdog reboot
 
 The Pico then reboots as if from power-on: drives RESB low on startup,
 initializes all subsystems, and releases RESB when ready. PHI2 (PWM)
-stops during reboot; this is harmless because the W65C02S is fully static
-and remains in reset (RESB is held low by the RC circuit).
+stops during reboot; this is harmless because the W65C02S is fully static.
+RESB may briefly float high during the ~50ms reboot window, but since
+PHI2 is also stopped, the 6502 cannot execute any instructions.
 
 #### RESB Pin
 
@@ -381,12 +381,9 @@ existing startup handshake handles this case.
  |                   | <-- Zero reads TLV --- |
  |                   | (TX queue drained)     |
  |                   |                        |
- |                   | hold RESB 500ms        |
- |                   | (RC cap discharges)    |
- |                   |                        |
  |                   | watchdog reboot        |
  |                   | (PHI2 stops, GPIOs     |
- |                   |  float, RC holds RESB) |
+ |                   |  float ~50ms)          |
  |                   |                        |
  |                   | --- Pico boots ---     |
  |                   | drives RESB low        |

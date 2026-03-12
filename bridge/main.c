@@ -16,7 +16,7 @@
  *   GPIO 4  -> 6502:  RESB (active-low, open-drain)
  *   The Pico holds RESB low on boot and releases after initialization.
  *   Reset can be triggered by:
- *     - External falling edge on RESB (pushbutton / RC circuit)
+ *     - External falling edge on RESB (pushbutton / supervisor IC)
  *     - 6502 writing to Device 1 (soft reset)
  *   On reset, the Pico notifies the Zero via a Device 0 TLV ('R'),
  *   waits for the Zero to read it, then reboots via watchdog.
@@ -210,18 +210,10 @@ static void bridge_reset(void) {
         }
     }
 
-    // Hold RESB low long enough to discharge the external RC cap.
-    // With R=100k, C=2.2uF (RC=220ms), 500ms gives >2 time constants,
-    // ensuring the cap voltage is below any CMOS threshold.
-    // This guarantees the RC circuit will hold RESB low during the
-    // Pico's reboot (~50ms).
-    printf("Reset: discharging RC cap...\n");
-    sleep_ms(500);
-
     // Reboot via watchdog.
-    // GPIO pins go to input/high-Z during boot. The RC circuit
-    // holds RESB low. On reboot, main() drives RESB low again,
-    // initializes everything, then releases RESB.
+    // GPIO pins go to input/high-Z during boot (~50ms). The external
+    // pull-up will try to release RESB, but main() drives it low again
+    // immediately on reboot, before releasing it once init is complete.
     printf("Reset: rebooting.\n");
     watchdog_reboot(0, 0, 0);
 
