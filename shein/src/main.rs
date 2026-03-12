@@ -20,6 +20,7 @@ use ui::StatusInfo;
 const NETBOOT_FILE: &str = "boot.bin";
 const MAX_TLV_DATA: usize = 254; // 255 reserved for busy
 const LOG_CAPACITY: usize = 1000;
+const BUS_MAX_BUFFER_SIZE: u16 = 4096; // Per-device buffer capacity on Pico
 
 /// Parse a SPI payload containing complete TLV packets (no straddling).
 fn parse_tlv_payload(payload: &[u8]) -> Vec<(u8, Vec<u8>)> {
@@ -154,6 +155,12 @@ impl App {
                     self.log(format!("Pico: {msg}"));
                 }
             }
+            1 => {
+                // System control: reset notification from Pico
+                if data == b"R" {
+                    self.handle_pico_reset();
+                }
+            }
             2 => {
                 // Video output
                 self.log_verbose(format!("Video RX {} bytes", data.len()));
@@ -253,6 +260,24 @@ impl App {
             }
             Err(e) => self.log(format!("Netboot: failed to read {NETBOOT_FILE}: {e}")),
         }
+    }
+
+    /// Handle a reset notification from the Pico.
+    /// The Pico sends Device 1 (system control), data='R' before rebooting.
+    fn handle_pico_reset(&mut self) {
+        self.log("Pico reset — re-syncing".to_string());
+
+        // Clear stale outgoing data
+        for q in &mut self.tx_queues {
+            q.clear();
+        }
+
+        // Pico is rebooting — buffers will be empty (full capacity)
+        self.master.buf = [BUS_MAX_BUFFER_SIZE; NUM_DEVICES];
+        self.status.buf = self.master.buf;
+
+        // Reset terminal to clean state
+        self.terminal = Terminal::new();
     }
 }
 

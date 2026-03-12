@@ -11,6 +11,15 @@
  * IRQ lines:
  *   GPIO 20 -> Zero:  "Pico has data" (managed by spi_slave)
  *   GPIO 3  -> 6502:  "Data available for read" (managed here)
+ *
+ * Reset:
+ *   GPIO 4  -> 6502:  RESB (active-low, open-drain)
+ *   The Pico holds RESB low on boot and releases after initialization.
+ *   Reset can be triggered by:
+ *     - External falling edge on RESB (pushbutton / supervisor IC)
+ *     - 6502 writing to Device 1 (soft reset)
+ *   On reset, the Pico notifies the Zero via a Device 0 TLV ('R'),
+ *   waits for the Zero to read it, then reboots via watchdog.
  */
 
 #include <stdio.h>
@@ -19,6 +28,7 @@
 #include "hardware/pwm.h"
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
+#include "hardware/watchdog.h"
 #include "pico/stdlib.h"
 #include "bus_interface.h"
 #include "spi_slave.h"
@@ -29,6 +39,12 @@ static uint32_t bus_to_spi_bytes = 0;
 static uint32_t spi_to_bus_msgs = 0;
 static uint32_t spi_to_bus_bytes = 0;
 static uint32_t spi_to_bus_drops = 0;
+
+// Reset
+static volatile bool reset_requested = false;
+
+// Startup banner (deferred until USB is ready)
+static bool startup_banner_printed = false;
 
 // ============================================================================
 // Device 0: local status register (not forwarded over SPI)
@@ -72,6 +88,15 @@ static void bus_to_spi_callback(uint8_t device, const uint8_t *data, uint16_t le
 
     bus_to_spi_msgs++;
     bus_to_spi_bytes += len;
+}
+
+// ============================================================================
+// Device 1: system control (soft reset)
+// ============================================================================
+
+static void device1_rx_callback(uint8_t device, const uint8_t *data, uint16_t len) {
+    (void)device; (void)data; (void)len;
+    reset_requested = true;
 }
 
 // ============================================================================
@@ -128,7 +153,7 @@ static void update_6502_irq(void) {
 // 6502 Clock management
 // ============================================================================
 
-void setup_6502_clock() {
+static void setup_6502_clock(void) {
     gpio_set_function(PIN_6502_PHI2, GPIO_FUNC_PWM);
     uint slice_num = pwm_gpio_to_slice_num(PIN_6502_PHI2);
 
@@ -147,9 +172,53 @@ void setup_6502_clock() {
     // Set a 50% duty cycle
     uint32_t level = (wrap + 1) / 2;
     pwm_set_gpio_level(PIN_6502_PHI2, level);
-    printf("System clock: %lu Hz, PWM wrap: %lu, level: %lu\n", (unsigned long)f_sys, (unsigned long)wrap, (unsigned long)level);
 
     pwm_set_enabled(slice_num, true);
+}
+
+// ============================================================================
+// RESB management
+// ============================================================================
+
+static void resb_fall_callback(uint gpio, uint32_t events) {
+    (void)events;
+    if (gpio == PIN_6502_RESB) {
+        reset_requested = true;
+    }
+}
+
+static void bridge_reset(void) {
+    printf("Reset requested.\n");
+
+    // Drive RESB low (may already be low if external reset).
+    // Disable the falling-edge interrupt so our own drive doesn't re-trigger.
+    gpio_set_irq_enabled(PIN_6502_RESB, GPIO_IRQ_EDGE_FALL, false);
+    gpio_set_dir(PIN_6502_RESB, GPIO_OUT);  // Drive low
+
+    // Notify Zero via SPI (SPI is still running).
+    uint8_t reset_msg[] = { 0x01, 0x01, 'R' };  // Device 1 (system), len 1, 'R'
+    spi_slave_tx_queue(reset_msg, sizeof(reset_msg));
+
+    // Keep running the SPI slave task until the Zero has read the
+    // notification (TX queue drains), or timeout after 1s.
+    uint32_t deadline = to_ms_since_boot(get_absolute_time()) + 1000;
+    while (spi_slave_tx_queue_len() > 0) {
+        spi_slave_task();
+        if (to_ms_since_boot(get_absolute_time()) > deadline) {
+            printf("Reset: Zero did not read notification (timeout).\n");
+            break;
+        }
+    }
+
+    // Reboot via watchdog.
+    // GPIO pins go to input/high-Z during boot (~50ms). The external
+    // pull-up will try to release RESB, but main() drives it low again
+    // immediately on reboot, before releasing it once init is complete.
+    printf("Reset: rebooting.\n");
+    watchdog_reboot(0, 0, 0);
+
+    // Should not reach here
+    while (1) tight_loop_contents();
 }
 
 // ============================================================================
@@ -158,12 +227,11 @@ void setup_6502_clock() {
 
 int main(void) {
     stdio_init_all();
-    sleep_ms(STARTUP_DELAY_MS);
 
-    printf("\n6502 <-> Zero SPI Bridge\n");
-    printf("  6502 bus: GPIO 0-2 (ctrl), 6-13 (data)\n");
-    printf("  SPI:      GPIO 16-19 (SPI0), 20 (IRQ), 21 (READY)\n");
-    printf("  6502 IRQ: GPIO %d\n\n", PIN_6502_IRQ);
+    // --- RESB: drive low immediately to hold 6502 in reset ---
+    gpio_init(PIN_6502_RESB);
+    gpio_put(PIN_6502_RESB, 0);            // Latch low
+    gpio_set_dir(PIN_6502_RESB, GPIO_OUT);  // Drive low = assert RESB
 
     // --- 6502 PHI2 clock ---
     setup_6502_clock();
@@ -182,8 +250,11 @@ int main(void) {
     // Device 0: local status register (reads handled by TX callback)
     bus_register_tx_callback(0, device0_tx_callback);
 
-    // Devices 1-7: forward to/from SPI
-    for (uint8_t d = 1; d < BUS_MAX_DEVICES; d++) {
+    // Device 1: system control (handled locally)
+    bus_register_rx_callback(1, device1_rx_callback);
+
+    // Devices 2-7: forward to/from SPI
+    for (uint8_t d = 2; d < BUS_MAX_DEVICES; d++) {
         bus_register_rx_callback(d, bus_to_spi_callback);
     }
 
@@ -196,11 +267,22 @@ int main(void) {
     }
     spi_slave_set_rx_callback(spi_rx_callback);
 
-    printf("Ready.\n\n");
+    // --- Release RESB: 6502 can now start its reset sequence ---
+    gpio_set_dir(PIN_6502_RESB, GPIO_IN);  // Tristate = release (external pull-up)
 
-    uint32_t last_stats = to_ms_since_boot(get_absolute_time());
+    // --- RESB falling-edge interrupt for external resets ---
+    gpio_set_irq_enabled_with_callback(PIN_6502_RESB, GPIO_IRQ_EDGE_FALL, true,
+                                       resb_fall_callback);
+
+    uint32_t boot_time = to_ms_since_boot(get_absolute_time());
+    uint32_t last_stats = boot_time;
 
     while (1) {
+        if (reset_requested) {
+            bridge_reset();
+            // Not reached — watchdog reboots
+        }
+
         bus_task();
         spi_slave_task();
         // Disabled - 6502 doesn't have a good IRQ handler yet.
@@ -208,6 +290,18 @@ int main(void) {
 
         // Periodic stats
         uint32_t now = to_ms_since_boot(get_absolute_time());
+
+        // Print startup banner once USB is ready (after STARTUP_DELAY_MS)
+        if (!startup_banner_printed && now - boot_time >= STARTUP_DELAY_MS) {
+            startup_banner_printed = true;
+            printf("\n6502 <-> Zero SPI Bridge%s\n",
+                   watchdog_caused_reboot() ? " (after reset)" : "");
+            printf("  6502 bus:  GPIO 0-2 (ctrl), 6-13 (data)\n");
+            printf("  SPI:       GPIO 16-19 (SPI0), 20 (IRQ), 21 (READY)\n");
+            printf("  6502 IRQ:  GPIO %d\n", PIN_6502_IRQ);
+            printf("  6502 RESB: GPIO %d\n\n", PIN_6502_RESB);
+        }
+
         if (now - last_stats >= STATS_INTERVAL_MS) {
             bus_stats_t bs = bus_get_stats();
             spi_slave_stats_t ss = spi_slave_get_stats();
