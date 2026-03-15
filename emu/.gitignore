@@ -9,6 +9,8 @@ lerna-debug.log*
 
 node_modules
 dist
+emu-core/target
+emu-core/pkg
 dist-ssr
 *.local
 

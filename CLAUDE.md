@@ -115,35 +115,7 @@ cargo run
 
 ### `emu/` — Web Emulator (TypeScript + React)
 
-Browser-based 6502 CPU emulator with debugger UI. Uses the `6502.ts` library for CPU simulation.
-
-**Key files:**
-| File | Purpose |
-|------|---------|
-| `src/App.tsx` | Main React component: CPU debugger, memory browser, ROM upload |
-| `src/peripherals.ts` | VIA + HD44780 LCD peripheral emulation |
-| `src/terminal.ts` | Terminal emulation (ANSI escape parsing, cell grid) |
-
-**Memory map (emulator):**
-- `0x0000–0x7FFF`: RAM (32 KB)
-- `0x8000–0xBFFF`: RAM (upper, 16 KB) — mapped to `0x0000` in some configs
-- `0xC000–0xCFFF`: VIA (65C22)
-- `0xE000–0xFFFF`: ROM
-
-**Build / Dev:**
-```bash
-cd emu
-npm install
-npm run dev      # Dev server with HMR at http://localhost:5173
-npm run build    # Production build (tsc + vite)
-npm run lint     # ESLint check
-```
-
-**Key dependencies:**
-- `react@19.x`, `react-dom`
-- `6502.ts` (pinned GitHub commit) — 6502 CPU emulator
-- `vremulcd` (GitHub main branch) — LCD emulator
-- Vite 7.x, TypeScript 5.9.x
+Browser-based 6502 CPU emulator with debugger UI.
 
 ---
 

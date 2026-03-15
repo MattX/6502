@@ -4,16 +4,16 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "wasm": "cd emu-core && wasm-pack build --target web",
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "npm run wasm && tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
-    "6502.ts": "git+https://github.com/MattX/6502.ts#e460f88bafeae7850d17de8ed0b5e12ecb737b00",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "vremulcd": "git+https://github.com/MattX/vrEmuLcd#main"
+    "vite-plugin-wasm": "^3.4.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
