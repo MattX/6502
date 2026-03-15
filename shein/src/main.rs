@@ -17,7 +17,6 @@ use spi_master::{IrqWatcher, SpiMaster, MAX_PAYLOAD, NUM_DEVICES};
 use terminal::Terminal;
 use ui::StatusInfo;
 
-const NETBOOT_FILE: &str = "boot.bin";
 const MAX_TLV_DATA: usize = 254; // 255 reserved for busy
 const LOG_CAPACITY: usize = 1000;
 const BUS_MAX_BUFFER_SIZE: u16 = 4096; // Per-device buffer capacity on Pico
@@ -167,9 +166,10 @@ impl App {
                 self.terminal.feed(data);
             }
             3 => {
-                // Netboot request
-                self.log("Netboot request received".to_string());
-                self.send_netboot();
+                // Netboot request: data contains the filename
+                let name = String::from_utf8_lossy(data).to_string();
+                self.log(format!("Netboot request: {name}"));
+                self.send_netboot(&name);
             }
             7 => {
                 // Echo: log summary and send back
@@ -251,14 +251,22 @@ impl App {
         Ok(())
     }
 
-    /// Read boot.bin and enqueue it over device 3.
-    fn send_netboot(&mut self) {
-        match fs::read(NETBOOT_FILE) {
-            Ok(data) => {
-                self.log(format!("Netboot: sending {} bytes from {NETBOOT_FILE}", data.len()));
-                self.enqueue_tlv(3, &data);
+    /// Read a named file and enqueue it over device 3 with a 2-byte BE length prefix.
+    fn send_netboot(&mut self, name: &str) {
+        match fs::read(name) {
+            Ok(file_data) => {
+                let total_len = file_data.len() as u16;
+                let mut prefixed = Vec::with_capacity(2 + file_data.len());
+                prefixed.push((total_len >> 8) as u8);
+                prefixed.push((total_len & 0xFF) as u8);
+                prefixed.extend_from_slice(&file_data);
+                self.log(format!("Netboot: sending {} bytes from {name}", file_data.len()));
+                self.enqueue_tlv(3, &prefixed);
             }
-            Err(e) => self.log(format!("Netboot: failed to read {NETBOOT_FILE}: {e}")),
+            Err(e) => {
+                self.log(format!("Netboot: file not found: {name} ({e})"));
+                self.enqueue_tlv(3, &[0x00, 0x00]);
+            }
         }
     }
 

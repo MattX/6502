@@ -108,6 +108,17 @@ impl Emulator {
         self.cpu.memory.bridge.keyboard_in.extend(data);
     }
 
+    // --- Netboot (device 3) ---
+
+    /// Upload a named binary file for netboot.
+    pub fn upload_file(&mut self, name: &str, data: &[u8]) {
+        self.cpu
+            .memory
+            .bridge
+            .uploaded_files
+            .insert(name.to_string(), data.to_vec());
+    }
+
     // --- LCD ---
 
     /// Get LCD pixel buffer. Each byte: 0=off, 1=on, 255=background.

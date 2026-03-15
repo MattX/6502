@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use crate::via::Via6522;
 use mos6502::memory::Bus;
@@ -134,12 +134,19 @@ enum PortState {
     },
 }
 
+struct NetbootState {
+    data: Vec<u8>, // 2-byte BE length prefix + file contents
+    offset: usize,
+}
+
 pub struct BridgePort {
     state: PortState,
     pub terminal: TextGrid,
     pub keyboard_in: VecDeque<u8>,
     pub echo: VecDeque<u8>,
     pub reset_requested: bool,
+    pub uploaded_files: HashMap<String, Vec<u8>>,
+    netboot: Option<NetbootState>,
 }
 
 impl BridgePort {
@@ -150,6 +157,8 @@ impl BridgePort {
             keyboard_in: VecDeque::new(),
             echo: VecDeque::new(),
             reset_requested: false,
+            uploaded_files: HashMap::new(),
+            netboot: None,
         }
     }
 
@@ -158,6 +167,7 @@ impl BridgePort {
         self.terminal.clear();
         self.keyboard_in.clear();
         self.reset_requested = false;
+        self.netboot = None;
     }
 
     fn write_byte(&mut self, value: u8) {
@@ -255,6 +265,22 @@ impl BridgePort {
                     }
                 }
             }
+            3 => {
+                if let Some(ref mut nb) = self.netboot {
+                    let remaining = nb.data.len() - nb.offset;
+                    let chunk = remaining.min(255);
+                    buf.push(chunk as u8);
+                    for i in 0..chunk {
+                        buf.push(nb.data[nb.offset + i]);
+                    }
+                    nb.offset += chunk;
+                    if nb.offset >= nb.data.len() {
+                        self.netboot = None;
+                    }
+                } else {
+                    buf.push(0);
+                }
+            }
             7 => {
                 let echo_available = self.echo.len().min(254);
                 buf.push(echo_available as u8);
@@ -279,6 +305,25 @@ impl BridgePort {
             2 => {
                 for &c in data {
                     self.terminal.put_char(c);
+                }
+            }
+            3 => {
+                let name = String::from_utf8_lossy(data).to_string();
+                if let Some(file_data) = self.uploaded_files.get(&name) {
+                    let total_len = file_data.len() as u16;
+                    let mut prefixed = Vec::with_capacity(2 + file_data.len());
+                    prefixed.push((total_len >> 8) as u8);
+                    prefixed.push((total_len & 0xFF) as u8);
+                    prefixed.extend_from_slice(file_data);
+                    self.netboot = Some(NetbootState {
+                        data: prefixed,
+                        offset: 0,
+                    });
+                } else {
+                    self.netboot = Some(NetbootState {
+                        data: vec![0, 0],
+                        offset: 0,
+                    });
                 }
             }
             7 => {

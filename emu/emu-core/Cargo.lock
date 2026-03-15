@@ -48,8 +48,9 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "mos6502"
-version = "0.8.0"
-source = "git+https://github.com/MattX/mos6502?branch=compliance-65c02#8e5353f196d9fa391942827099a2dfcb1f7cea68"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1dd8384601f3b3a7e258d1f7a5c77f448e7bd26792958de10b8a56fff6c9c9df"
 dependencies = [
  "bitflags",
  "log",

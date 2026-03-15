@@ -44,6 +44,7 @@ function EmulatorUI({ emu }: { emu: Emulator }) {
 
   const terminalRef = useRef<HTMLPreElement>(null);
   const [lcdPixels, setLcdPixels] = useState<Uint8Array | null>(null);
+  const [uploadedFiles, setUploadedFiles] = useState<string[]>([]);
 
   const refresh = useCallback(() => {
     setLcdPixels(emu.lcd_pixels(Date.now()));
@@ -100,6 +101,20 @@ function EmulatorUI({ emu }: { emu: Emulator }) {
     e.target.value = "";
   }
 
+  function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const data = new Uint8Array(ev.target!.result as ArrayBuffer);
+      const name = file.name.replace(/\.[^.]+$/, "");
+      emu.upload_file(name, data);
+      setUploadedFiles((prev) => [...prev.filter((n) => n !== name), name]);
+    };
+    reader.readAsArrayBuffer(file);
+    e.target.value = "";
+  }
+
   const pc = emu.pc();
   const sp = emu.sp();
   const disasm = emu.disassemble_at(pc, 20);
@@ -120,6 +135,15 @@ function EmulatorUI({ emu }: { emu: Emulator }) {
           Upload ROM
           <input type="file" accept=".bin,.rom" onChange={handleRomUpload} />
         </label>
+        <label className="rom-upload-btn">
+          Upload Program
+          <input type="file" accept=".bin" onChange={handleFileUpload} />
+        </label>
+        {uploadedFiles.length > 0 && (
+          <span className="uploaded-files">
+            Programs: {uploadedFiles.join(", ")}
+          </span>
+        )}
         {cyclesPerSec !== null && (
           <span className="perf-counter">
             {cyclesPerSec >= 1_000_000

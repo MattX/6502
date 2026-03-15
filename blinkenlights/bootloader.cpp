@@ -109,6 +109,64 @@ void term_getline(char* line_buf) {
     line_buf[total_len - 1] = 0;
 }
 
+// Load a program from device 3 (netboot) into RAM at $0400 and jump to it.
+// name must be <255 chars (guaranteed by term_getline's uint8_t length).
+void cmd_load(const char* name) {
+    uint16_t name_len = strlen(name);
+    if (name_len == 0) {
+        term_putstr("Usage: load <name>\n");
+        return;
+    }
+
+    // Send filename to device 3
+    io_write(3, (const uint8_t*)name, (uint8_t)name_len);
+
+    // Read first chunk (spin until data available)
+    static uint8_t load_buf[255];
+    uint8_t len;
+    do {
+        len = io_read(3, load_buf);
+    } while (len == 0);
+
+    if (len < 2) {
+        term_putstr("Error: bad response\n");
+        return;
+    }
+
+    uint16_t total = ((uint16_t)load_buf[0] << 8) | load_buf[1];
+    if (total == 0) {
+        term_putstr("File not found: ");
+        term_putstr(name);
+        term_putstr("\n");
+        return;
+    }
+
+    term_putstr("Loading ");
+    term_puthex16(total);
+    term_putstr(" bytes...\n");
+
+    // Copy initial data (after 2-byte length header)
+    uint8_t* dest = (uint8_t*)0x0400;
+    uint16_t received = 0;
+    for (uint8_t i = 2; i < len; i++) {
+        *dest++ = load_buf[i];
+        received++;
+    }
+
+    // Read remaining chunks
+    while (received < total) {
+        len = io_read(3, load_buf);
+        if (len == 0) continue;
+        for (uint8_t i = 0; i < len; i++) {
+            *dest++ = load_buf[i];
+            received++;
+        }
+    }
+
+    term_putstr("OK, jumping to $0400\n");
+    ((void (*)(void))0x0400)();
+}
+
 bool starts_with(const char* str, const char* prefix) {
     while (*prefix != 0) {
         if (*str != *prefix) {
@@ -144,6 +202,8 @@ int main() {
         if (starts_with((char*)recv_buf, "lcd ")) {
             lcd_reset();
             lcd_putstr((char*)recv_buf + 4);
+        } else if (starts_with((char*)recv_buf, "load ")) {
+            cmd_load((char*)recv_buf + 5);
         } else if (starts_with((char*)recv_buf, "peek ")) {
             uint16_t address;
             bool ok = parse_hex((char*)recv_buf + 5, &address);

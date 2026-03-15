@@ -92,9 +92,21 @@ keys and keyup / keydown are useful.
 
 ### Netboot
 
-Writing anything to this device will cause the Zero to send a user-selectable
-program over this device. This is intended for the 6502 ROM bootloader to load
-it to RAM then jump to it, avoiding constant ROM reflashes.
+The 6502 writes a filename (as raw bytes, no null terminator) to device 3. The
+Zero looks up the file and responds with a 2-byte big-endian length prefix
+followed by the file contents:
+
+```
+6502 writes: [device 3] [name_len] [filename...]
+6502 reads:  [len_hi] [len_lo] [data...]
+```
+
+If the file is not found, the Zero responds with length 0x0000. Data is
+delivered across multiple TLV reads (max 254 bytes each); the 6502 reads
+repeatedly until it has received `len` bytes total.
+
+This is intended for the ROM bootloader to load programs to RAM (at $0400)
+then jump to them, avoiding constant ROM reflashes.
 
 ## Pico - Zero SPI Protocol
 
