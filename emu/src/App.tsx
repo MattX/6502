@@ -45,9 +45,32 @@ function EmulatorUI({ emu }: { emu: Emulator }) {
   const terminalRef = useRef<HTMLPreElement>(null);
   const [lcdPixels, setLcdPixels] = useState<Uint8Array | null>(null);
   const [uploadedFiles, setUploadedFiles] = useState<string[]>([]);
+  const [packets, setPackets] = useState<Packet[]>([]);
 
   const refresh = useCallback(() => {
     setLcdPixels(emu.lcd_pixels(Date.now()));
+    const raw = emu.drain_packets();
+    if (raw.length > 0) {
+      const newPackets = parsePackets(raw);
+      setPackets((prev) => {
+        const merged = prev.length > 0 ? [...prev] : [];
+        for (const p of newPackets) {
+          const last = merged[merged.length - 1];
+          if (
+            last &&
+            last.direction === p.direction &&
+            last.device === p.device &&
+            last.data.length === p.data.length &&
+            last.data.every((b, i) => b === p.data[i])
+          ) {
+            last.count++;
+          } else {
+            merged.push(p);
+          }
+        }
+        return merged.length > 200 ? merged.slice(merged.length - 200) : merged;
+      });
+    }
     setTick((t) => t + 1);
   }, [emu]);
 
@@ -85,6 +108,7 @@ function EmulatorUI({ emu }: { emu: Emulator }) {
   function reset() {
     setRunning(false);
     emu.reset();
+    setPackets([]);
     refresh();
   }
 
@@ -167,6 +191,7 @@ function EmulatorUI({ emu }: { emu: Emulator }) {
           terminalRef={terminalRef}
           onKey={(data) => emu.send_keyboard_input(data)}
         />
+        <PacketInspector packets={packets} onClear={() => setPackets([])} />
         <div className="memory-panels">
           <PageBrowser emu={emu} sp={sp} />
           <StackDisplay emu={emu} sp={sp} />
@@ -371,6 +396,79 @@ function LcdWidget({ emu, pixels }: { emu: Emulator; pixels: Uint8Array | null }
         height={h}
         style={{ width: w * LCD_SCALE, height: h * LCD_SCALE }}
       />
+    </div>
+  );
+}
+
+const DEVICE_NAMES: Record<number, string> = {
+  0: "Status",
+  1: "Control",
+  2: "Terminal",
+  3: "Netboot",
+  4: "Network",
+  7: "Echo",
+};
+
+interface Packet {
+  direction: number;
+  device: number;
+  data: number[];
+  count: number;
+}
+
+function parsePackets(buf: Uint8Array): Packet[] {
+  const packets: Packet[] = [];
+  let i = 0;
+  while (i + 2 < buf.length) {
+    const direction = buf[i];
+    const device = buf[i + 1];
+    const len = buf[i + 2];
+    i += 3;
+    const data: number[] = [];
+    for (let j = 0; j < len && i < buf.length; j++, i++) {
+      data.push(buf[i]);
+    }
+    packets.push({ direction, device, data, count: 1 });
+  }
+  return packets;
+}
+
+function PacketInspector({ packets, onClear }: {
+  packets: Packet[];
+  onClear: () => void;
+}) {
+  const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (listRef.current) {
+      listRef.current.scrollTop = listRef.current.scrollHeight;
+    }
+  }, [packets]);
+
+  return (
+    <div className="packet-inspector">
+      <div className="packet-header">
+        <h2>Packets</h2>
+        <button onClick={onClear}>Clear</button>
+      </div>
+      <div className="packet-list" ref={listRef}>
+        {packets.length === 0 && <div className="packet-empty">No packets captured</div>}
+        {packets.map((p, i) => {
+          const arrow = p.direction === 0 ? "→" : "←";
+          const name = DEVICE_NAMES[p.device] ?? `Dev${p.device}`;
+          const hexBytes = p.data.slice(0, 32).map((b) => hex8(b)).join(" ");
+          const truncated = p.data.length > 32 ? "…" : "";
+          return (
+            <div key={i} className={`packet-row ${p.direction === 0 ? "pkt-write" : "pkt-read"}`}>
+              <span className="pkt-arrow">{arrow}</span>
+              <span className="pkt-device">{name}</span>
+              <span className="pkt-len">[{p.data.length}]</span>
+              <span className="pkt-data">{hexBytes}{truncated}</span>
+              {p.count > 1 && <span className="pkt-count">×{p.count}</span>}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

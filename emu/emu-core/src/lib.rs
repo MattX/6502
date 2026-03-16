@@ -134,6 +134,23 @@ impl Emulator {
         self.cpu.memory.via.lcd_height()
     }
 
+    // --- Packet inspector ---
+
+    /// Drain captured TLV packets as a flat byte buffer.
+    /// Format per entry: [direction: 1] [device: 1] [len: 1] [data: len bytes]
+    pub fn drain_packets(&mut self) -> Vec<u8> {
+        let entries = self.cpu.memory.bridge.drain_packets();
+        let mut out = Vec::new();
+        for e in entries {
+            out.push(e.direction);
+            out.push(e.device);
+            let len = e.data.len().min(255) as u8;
+            out.push(len);
+            out.extend_from_slice(&e.data[..len as usize]);
+        }
+        out
+    }
+
     // --- Disassembly ---
 
     /// Disassemble `lines` instructions starting at `addr`.

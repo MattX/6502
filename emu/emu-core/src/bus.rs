@@ -90,6 +90,12 @@ impl TextGrid {
     }
 }
 
+pub struct PacketEntry {
+    pub direction: u8, // 0 = write (CPU→bridge), 1 = read (bridge→CPU)
+    pub device: u8,
+    pub data: Vec<u8>,
+}
+
 /// Fixed-size buffer for bridge I/O — zero heap allocation on the hot path.
 const BRIDGE_BUF_CAP: usize = 256;
 
@@ -147,6 +153,7 @@ pub struct BridgePort {
     pub reset_requested: bool,
     pub uploaded_files: HashMap<String, Vec<u8>>,
     netboot: Option<NetbootState>,
+    packet_log: Vec<PacketEntry>,
 }
 
 impl BridgePort {
@@ -159,6 +166,7 @@ impl BridgePort {
             reset_requested: false,
             uploaded_files: HashMap::new(),
             netboot: None,
+            packet_log: Vec::new(),
         }
     }
 
@@ -168,6 +176,11 @@ impl BridgePort {
         self.keyboard_in.clear();
         self.reset_requested = false;
         self.netboot = None;
+        self.packet_log.clear();
+    }
+
+    pub fn drain_packets(&mut self) -> Vec<PacketEntry> {
+        std::mem::take(&mut self.packet_log)
     }
 
     fn write_byte(&mut self, value: u8) {
@@ -268,7 +281,7 @@ impl BridgePort {
             3 => {
                 if let Some(ref mut nb) = self.netboot {
                     let remaining = nb.data.len() - nb.offset;
-                    let chunk = remaining.min(255);
+                    let chunk = remaining.min(254);
                     buf.push(chunk as u8);
                     for i in 0..chunk {
                         buf.push(nb.data[nb.offset + i]);
@@ -294,10 +307,26 @@ impl BridgePort {
                 buf.push(0);
             }
         }
+        // Log the read response (skip the length byte at position 0)
+        let payload = if buf.len > 1 {
+            buf.data[1..buf.len as usize].to_vec()
+        } else {
+            Vec::new()
+        };
+        self.packet_log.push(PacketEntry {
+            direction: 1,
+            device,
+            data: payload,
+        });
         PortState::ReadData { buf, pos: 0 }
     }
 
     fn dispatch_write(&mut self, device: u8, data: &[u8]) {
+        self.packet_log.push(PacketEntry {
+            direction: 0,
+            device,
+            data: data.to_vec(),
+        });
         match device {
             1 => {
                 self.reset_requested = true;

@@ -153,6 +153,87 @@ td {
   outline-offset: -1px;
 }
 
+/* Packet inspector */
+.packet-inspector {
+  min-width: 30ch;
+  max-width: 60ch;
+}
+
+.packet-inspector h2 {
+  margin: 0.5rem 0 0.25rem;
+}
+
+.packet-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.packet-header button {
+  font-size: 0.75rem;
+  padding: 0.1rem 0.5rem;
+}
+
+.packet-list {
+  font-family: monospace;
+  font-size: 0.78rem;
+  height: 200px;
+  overflow-y: auto;
+  border: 1px solid #888;
+  padding: 0.25rem;
+}
+
+.packet-empty {
+  opacity: 0.5;
+  padding: 0.5rem;
+  text-align: center;
+}
+
+.packet-row {
+  display: flex;
+  gap: 0.4rem;
+  padding: 1px 0.25rem;
+  white-space: nowrap;
+}
+
+.packet-row:nth-child(even) {
+  background: rgba(128, 128, 128, 0.08);
+}
+
+.pkt-arrow {
+  flex-shrink: 0;
+}
+
+.pkt-write .pkt-arrow {
+  color: #cc6600;
+}
+
+.pkt-read .pkt-arrow {
+  color: #2288cc;
+}
+
+.pkt-device {
+  flex-shrink: 0;
+  min-width: 8ch;
+}
+
+.pkt-len {
+  flex-shrink: 0;
+  opacity: 0.6;
+  min-width: 4ch;
+}
+
+.pkt-data {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pkt-count {
+  flex-shrink: 0;
+  opacity: 0.5;
+  font-size: 0.72rem;
+}
+
 /* Dark mode */
 @media (prefers-color-scheme: dark) {
   body {
@@ -185,6 +266,11 @@ td {
     background-color: #554400 !important;
     color: #ffdd44;
   }
+
+  .packet-list {
+    background-color: #0d0d0d;
+    border-color: #555;
+  }
 }
 
 /* Light mode */
@@ -206,5 +292,9 @@ td {
   .marker-cell {
     background-color: #ffe033 !important;
     color: #332200;
+  }
+
+  .packet-list {
+    background-color: #fafafa;
   }
 }
