@@ -1,0 +1,68 @@
+Name       W65C02_Control;
+PartNo     02;
+Date       03/17/2026;
+Revision   01;
+Designer   None;
+Company    None;
+Assembly   None;
+Location   None;
+Device     g22V10;
+
+/* =========================================
+   INPUT PINS
+   ========================================= */
+Pin 1  = OSC;
+Pin 2  = RUN_STOP;
+Pin 3  = STEP_BTN;
+Pin 4  = RW;
+Pin 5  = PHI2;
+Pin 6  = BANK_SEL;
+Pin 7  = VIA_IRQ;
+Pin 8  = RPI_IRQ;
+
+/* =========================================
+   OUTPUT PINS
+   ========================================= */
+Pin 14 = !CPU_IRQ;
+Pin 15 = !BANK_SEL_OE;
+Pin 16 = BANK_SEL_CLK;
+Pin 17 = !MEM_OE;
+Pin 18 = !RAM_WE;
+Pin 22 = LATCHED_RUN;
+Pin 23 = SYS_CLK;
+
+/* =========================================
+   REGISTERED LOGIC
+   ========================================= */
+LATCHED_RUN.D = RUN_STOP;
+
+/* =========================================
+   CLOCK MUX
+   ========================================= */
+/* SYS_CLK is opposite phase to OSC.
+   LATCHED_RUN updates on rising OSC, but !OSC is low
+   at that moment, so the AND term is zero -- no runt
+   pulse regardless of CLK-to-Q delay. */
+SYS_CLK = (LATCHED_RUN & !OSC)
+        # (!LATCHED_RUN & STEP_BTN);
+
+/* =========================================
+   CONTROL SIGNALS
+   ========================================= */
+/* Memory OE: active when reading */
+MEM_OE = RW;
+
+/* RAM write enable: active during write + Phi2 high */
+RAM_WE = !RW & PHI2;
+
+/* Bank select readback buffer OE: active during reads */
+BANK_SEL_OE = BANK_SEL & RW;
+
+/* Bank select latch clock: rising edge on Phi2 falling */
+!BANK_SEL_CLK = BANK_SEL & !RW & PHI2;
+
+/* =========================================
+   INTERRUPT COMBINING
+   ========================================= */
+/* Active-low AND = active-low OR of interrupt requests */
+CPU_IRQ = VIA_IRQ & RPI_IRQ;
