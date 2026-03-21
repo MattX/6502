@@ -154,8 +154,8 @@ static void update_6502_irq(void) {
 // ============================================================================
 
 static void setup_6502_clock(void) {
-    gpio_set_function(PIN_6502_PHI2, GPIO_FUNC_PWM);
-    uint slice_num = pwm_gpio_to_slice_num(PIN_6502_PHI2);
+    gpio_set_function(PIN_6502_OSC, GPIO_FUNC_PWM);
+    uint slice_num = pwm_gpio_to_slice_num(PIN_6502_OSC);
 
     // Calculate the wrap value for the target frequency.
     // Assuming divider = 1.0: wrap = (f_sys / f_pwm) - 1
@@ -171,7 +171,7 @@ static void setup_6502_clock(void) {
 
     // Set a 50% duty cycle
     uint32_t level = (wrap + 1) / 2;
-    pwm_set_gpio_level(PIN_6502_PHI2, level);
+    pwm_set_gpio_level(PIN_6502_OSC, level);
 
     pwm_set_enabled(slice_num, true);
 }
@@ -233,7 +233,7 @@ int main(void) {
     gpio_put(PIN_6502_RESB, 0);            // Latch low
     gpio_set_dir(PIN_6502_RESB, GPIO_OUT);  // Drive low = assert RESB
 
-    // --- 6502 PHI2 clock ---
+    // --- 6502 oscillator clock output ---
     setup_6502_clock();
 
     // --- 6502 IRQ pin (active-low, tristated on boot) ---
@@ -297,6 +297,8 @@ int main(void) {
             printf("\n6502 <-> Zero SPI Bridge%s\n",
                    watchdog_caused_reboot() ? " (after reset)" : "");
             printf("  6502 bus:  GPIO 0-2 (ctrl), 6-13 (data)\n");
+            printf("  6502 OSC:  GPIO %d (PWM out)\n", PIN_6502_OSC);
+            printf("  6502 PHI2: GPIO %d (input)\n", PIN_6502_PHI2);
             printf("  SPI:       GPIO 16-19 (SPI0), 20 (IRQ), 21 (READY)\n");
             printf("  6502 IRQ:  GPIO %d\n", PIN_6502_IRQ);
             printf("  6502 RESB: GPIO %d\n\n", PIN_6502_RESB);

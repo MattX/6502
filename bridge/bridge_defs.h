@@ -16,7 +16,8 @@
 // PIO bus pins (RW, CS_N, PHI2, D0-D7) are defined in bus_interface.pio.h
 // via .define PUBLIC and the c-sdk block.  Only non-PIO pins go here.
 
-#define PIN_6502_PHI2   2       // PHI2 clock output (PWM)
+#define PIN_6502_PHI2   2       // Processed PHI2 clock input
+#define PIN_6502_OSC    15      // Oscillator clock output (PWM)
 #define PIN_6502_IRQ    3       // IRQ to 6502 (active-low, open-drain)
 #define PIN_6502_RESB   4       // RESB to 6502 (active-low, open-drain)
 
