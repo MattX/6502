@@ -35,13 +35,18 @@ impl Emulator {
         self.cpu.single_step()
     }
 
-    /// Execute instructions until the cycle budget is exhausted.
+    /// Execute instructions until the cycle budget is exhausted or
+    /// a terminal write occurs (so the UI can refresh immediately).
     /// Returns the number of cycles actually consumed.
     pub fn run_for_cycles(&mut self, budget: u32) -> u32 {
+        self.cpu.memory.bridge.terminal_dirty = false;
         let start = self.cpu.cycles;
         let target = start + budget as u64;
         while self.cpu.cycles < target {
             if !self.cpu.single_step() {
+                break;
+            }
+            if self.cpu.memory.bridge.terminal_dirty {
                 break;
             }
         }

@@ -151,6 +151,7 @@ pub struct BridgePort {
     pub keyboard_in: VecDeque<u8>,
     pub echo: VecDeque<u8>,
     pub reset_requested: bool,
+    pub terminal_dirty: bool,
     pub uploaded_files: HashMap<String, Vec<u8>>,
     netboot: Option<NetbootState>,
     packet_log: Vec<PacketEntry>,
@@ -164,6 +165,7 @@ impl BridgePort {
             keyboard_in: VecDeque::new(),
             echo: VecDeque::new(),
             reset_requested: false,
+            terminal_dirty: false,
             uploaded_files: HashMap::new(),
             netboot: None,
             packet_log: Vec::new(),
@@ -175,6 +177,7 @@ impl BridgePort {
         self.terminal.clear();
         self.keyboard_in.clear();
         self.reset_requested = false;
+        self.terminal_dirty = false;
         self.netboot = None;
         self.packet_log.clear();
     }
@@ -335,6 +338,7 @@ impl BridgePort {
                 for &c in data {
                     self.terminal.put_char(c);
                 }
+                self.terminal_dirty = true;
             }
             3 => {
                 let name = String::from_utf8_lossy(data).to_string();

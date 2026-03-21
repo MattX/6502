@@ -39,7 +39,6 @@ function EmulatorUI({ emu }: { emu: Emulator }) {
   const [running, setRunning] = useState(false);
   const [, setTick] = useState(0);
   const [cyclesPerSec, setCyclesPerSec] = useState<number | null>(null);
-  const intervalRef = useRef<number | null>(null);
   const perfRef = useRef({ lastTime: 0, lastCycles: 0 });
 
   const terminalRef = useRef<HTMLPreElement>(null);
@@ -77,9 +76,24 @@ function EmulatorUI({ emu }: { emu: Emulator }) {
   useEffect(() => {
     if (running) {
       perfRef.current = { lastTime: performance.now(), lastCycles: emu.cycles() };
-      intervalRef.current = window.setInterval(() => {
-        emu.run_for_cycles(100_000);
+      let timerId: number | null = null;
+      let lastFrame = performance.now();
+      const CPU_HZ = 1_000_000; // 1 MHz
+      const frame = () => {
         const now = performance.now();
+        const dt = now - lastFrame;
+        lastFrame = now;
+        // Budget cycles proportional to elapsed wall-clock time at 1 MHz
+        let remaining = Math.round((dt / 1000) * CPU_HZ);
+        while (remaining > 0) {
+          const used = emu.run_for_cycles(remaining);
+          remaining -= used;
+          if (used === 0) break; // CPU halted
+          if (remaining > 0) {
+            // Broke out early (terminal write) — refresh mid-frame
+            refresh();
+          }
+        }
         const elapsed = now - perfRef.current.lastTime;
         if (elapsed >= 1000) {
           const dc = emu.cycles() - perfRef.current.lastCycles;
@@ -87,14 +101,14 @@ function EmulatorUI({ emu }: { emu: Emulator }) {
           perfRef.current = { lastTime: now, lastCycles: emu.cycles() };
         }
         refresh();
-      }, 100);
+        const frameTime = performance.now() - now;
+        timerId = window.setTimeout(frame, Math.max(0, 10 - frameTime));
+      };
+      timerId = window.setTimeout(frame, 0);
+      return () => {
+        if (timerId !== null) window.clearTimeout(timerId);
+      };
     }
-    return () => {
-      if (intervalRef.current !== null) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-    };
   }, [running, emu, refresh]);
 
   function start() { setRunning(true); }
