@@ -4,7 +4,7 @@
 
 // Avoid writing to stack and zeropage
 const uint16_t LOW_RAM = 0x2000;
-const uint16_t HIGH_RAM = 0x7FFF;
+const uint16_t HIGH_RAM = 0x9BFF;  // Stop 1KB below stack at $A000
 
 void lcd_putstr(const char* msg) {
     while (*msg != 0) {

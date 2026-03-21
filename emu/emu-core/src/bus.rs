@@ -3,9 +3,9 @@ use std::collections::{HashMap, VecDeque};
 use crate::via::Via6522;
 use mos6502::memory::Bus;
 
-const RAM_SIZE: usize = 0x8000;
-const ROM_SIZE: usize = 0x2000;
-const ROM_START: u16 = 0xE000;
+const RAM_SIZE: usize = 0xA000;
+const ROM_SIZE: usize = 0x1F00;
+const ROM_START: u16 = 0xE100;
 
 const TERM_COLS: usize = 40;
 const TERM_ROWS: usize = 25;
@@ -383,10 +383,10 @@ impl MattbrewBus {
     /// Side-effect-free read for disassembly and memory inspection.
     pub fn peek(&self, address: u16) -> u8 {
         match address {
-            0x0000..=0x7FFF => self.ram[address as usize],
-            0xC000..=0xC7FF => self.via.read((address & 0x0F) as u8),
-            0xC800..=0xCFFF => 0x00,
-            0xE000..=0xFFFF => self.rom[(address - ROM_START) as usize],
+            0x0000..=0x9FFF => self.ram[address as usize],
+            0xE000..=0xE03F => self.via.read((address & 0x0F) as u8),
+            0xE040..=0xE07F => 0x00,
+            0xE100..=0xFFFF => self.rom[(address - ROM_START) as usize],
             _ => 0xFF,
         }
     }
@@ -405,19 +405,19 @@ impl MattbrewBus {
 impl Bus for MattbrewBus {
     fn get_byte(&mut self, address: u16) -> u8 {
         match address {
-            0x0000..=0x7FFF => self.ram[address as usize],
-            0xC000..=0xC7FF => self.via.read((address & 0x0F) as u8),
-            0xC800..=0xCFFF => self.bridge.read_byte(),
-            0xE000..=0xFFFF => self.rom[(address - ROM_START) as usize],
+            0x0000..=0x9FFF => self.ram[address as usize],
+            0xE000..=0xE03F => self.via.read((address & 0x0F) as u8),
+            0xE040..=0xE07F => self.bridge.read_byte(),
+            0xE100..=0xFFFF => self.rom[(address - ROM_START) as usize],
             _ => 0xFF,
         }
     }
 
     fn set_byte(&mut self, address: u16, value: u8) {
         match address {
-            0x0000..=0x7FFF => self.ram[address as usize] = value,
-            0xC000..=0xC7FF => self.via.write((address & 0x0F) as u8, value),
-            0xC800..=0xCFFF => self.bridge.write_byte(value),
+            0x0000..=0x9FFF => self.ram[address as usize] = value,
+            0xE000..=0xE03F => self.via.write((address & 0x0F) as u8, value),
+            0xE040..=0xE07F => self.bridge.write_byte(value),
             _ => {}
         }
     }

@@ -48,7 +48,7 @@ impl Emulator {
         (self.cpu.cycles - start) as u32
     }
 
-    /// Load a ROM (max 8KB) and reset the CPU.
+    /// Load a ROM (max $1F00 / 7936 bytes) and reset the CPU.
     pub fn load_rom(&mut self, data: &[u8]) {
         self.cpu.memory.load_rom(data);
         self.cpu.memory.clear_ram();

@@ -18,3 +18,13 @@ There are two big differences with RP6502:
 Either way, the goal is to view both the Pi Zero and Pi Pico as peripherals of the core 6502 system, and not the other way around.
 
 The 6502<->Pico interface is documented and implemented in pio_bus_interface.
+
+## Code organization
+
+* `blinkenlights`: Various ROM programs for the mattbrew
+* `bridge`: Code for the Pico sitting on the 6502 bus
+* `CPLD`: PLD code for the 22V10s used for address decode and control signal generation
+* `llvm-mos-sdk`: Fork of llvm-mos-sdk with a mattbrew platform. Currently configured to produce ROMs; ultimately I want one target for ROMs and one for RAM-loaded programs.
+* `pico-sdk`: An (unmodified) Pico SDK used to build `bridge`
+* `shein`: Runs on the Pi Zero and handles the various devices
+* `TaliForth2`: TaliForth2 with a mattbrew target added.
