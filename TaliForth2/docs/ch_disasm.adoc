@@ -1,0 +1,194 @@
+Tali Forth is currently shipped with a very primitive disassembler, which is
+started with `disasm ( addr u -- )`.
+
+=== Format
+
+The output format is in Simpler Assembler Notation (SAN). Briefly, the
+instruction's mode is added to the mnemonic, leaving the operand a pure number.
+For use in a postfix environment like Tali Forth, the operand is listed _before_
+the mnemonic. This way, traditional assembly code such as
+
+----
+LDA #1
+DEC
+STA $1000
+STA $80
+NOP
+LDA ($80)
+----
+
+becomes (assuming `hex` for hexadecimal numbers):
+
+----
+        1 lda.#
+          dec.a
+     1000 sta
+       80 sta.z
+          nop
+       80 lda.zi
+----
+
+See the Appendix for a more detailed discussion of the format.
+
+
+=== Output
+
+The disassembler prints the address of the instruction, followed by any operand
+and the mnemonic. To get the code of `drop`, for instance, we can use
+`' drop 6 disasm`:
+
+----
+36142  55337 jsr     STACK DEPTH CHECK
+36145        inx
+36146        inx
+36147        rts
+----
+
+The Forth word `see` calls the disassembler while using a hexadecimal number
+base. So `see drop` produces:
+
+----
+nt: BC34  xt: 8653
+flags: CO 0 IM 0 AN 0 NN 0 HC 0 | UF 1 ST 0
+size (decimal): 5
+
+8653  20 B5 D8 E8 E8   ....
+
+8653   D8B5 jsr     1 STACK DEPTH CHECK
+8656        inx
+8657        inx
+----
+
+Note that `see` does not print the final `rts` instruction.
+
+=== Determining address labels
+
+When disassembling, using either `disasm` or `see`, the dictionary is searched
+anytime a `jsr` is encountered and the name of the word will be printed if a
+word with that address is found.  Some interal routines in Tali are not in the
+Forth dictionary and so no name will be printed.  Here is an example when running
+`see order`
+
+----
+nt: CA31  xt: B31A
+flags: CO 0 IM 0 AN 0 NN 0 HC 0 | UF 0 ST 0
+size (decimal): 42
+
+B31A  20 EC 83 20 EA B2 B5 00  F0 1E A8 E8 E8 B5 00 5A   .. .... .......Z
+B32A  20 45 B3 7A 88 D0 F4 20  B3 91 20 B3 91 20 DF B2   E.z...  .. .. ..
+B33A  B5 00 20 45 B3 20 EC 83  E8 E8  .. E. .. ..
+
+B31A   83EC jsr     cr
+B31D   B2EA jsr     get-order
+B320      0 lda.zx
+B322     1E beq     B342 v
+B324        tay
+B325        inx
+B326        inx
+B327      0 lda.zx
+B329        phy
+B32A   B345 jsr
+B32D        ply
+B32E        dey
+B32F     F4 bne     B325 ^
+B331   91B3 jsr     space
+B334   91B3 jsr     space
+B337   B2DF jsr     get-current
+B33A      0 lda.zx
+B33C   B345 jsr
+B33F   83EC jsr     cr
+B342        inx
+B343        inx
+----
+
+This word is a mixture of assembly and other forth words.  Note that the second
+to last jsr shows a destination address of 9870 (in hex).  To trace this
+further, consult the labelmap for your platform in the /docs folder.  In this
+case, searching for 9870 in the labelmap finds the following label and the
+assembly files can be searched to locate this routine if you need to see its
+source.
+
+----
+order_print_wid_string= $9870
+----
+
+=== Literals and Strings
+
+Tali compiles literals into words by saving a jsr to a helper
+routine followed immediately by the data for the literal.  During
+disassembly, the literal value will be printed and the disassembler will resume
+disassembling from just after the literal value.  Doubles are saved in memory as
+two single cell literal values.
+
+Strings are similar, they are saved in memory as a jsr to the string handling routine,
+then the string length and inline string data (similar to how literals are
+handled).  When the disassembler encounters a string, it will print SLITERAL
+followed by the length of the string and a snippet of the data:
+----
+: example s" This is a string" ;  ok
+see example
+nt: 827  xt: 836
+flags: CO 0 IM 0 AN 0 NN 0 HC 0 | UF 0 ST 0
+size (decimal): 21
+
+0836  20 29 A2 10 00 54 68 69  73 20 69 73 20 61 20 73   )...Thi s is a s
+0846  74 72 69 6E 67                                    tring
+
+836   A229 jsr     SLITERAL 10 This is a strin...
+ ok
+----
+To see the value of the string, you can either look at the memory dump above the
+disassembly or you can `type` the string yourself (note that `see` will always
+give the values in hex while `disasm` will use the current `base`):
+----
+hex 836 5 + 10 cr type
+This is a string ok
+----
+
+=== Gotchas and known issues
+
+Tali Forth enforces the *signature byte* of the `brk` assembler instruction.
+That is, it is treated like a two-byte instruction. Since you probably shouldn't be
+using `brk` anyway, this behavior is usually only interesting when examing the
+code, where a block of zeros will produce something like the following with the
+disassembler:
+
+----
+124B      0 brk
+124D      0 brk
+124F      0 brk
+1251      0 brk
+----
+
+Because of the stack structure of Forth, the disassembler will not catch
+assembler instructions that were *assigned an operand by mistake*. Take this
+(broken) code:
+
+----
+nop
+10 dex  <1>
+nop
+rts
+----
+<1> Error: DEX does not take an operand!
+
+The disassembler will output this code (addresses might vary):
+----
+4661        nop
+4662        dex  <1>
+4663        nop
+4664        rts
+----
+<1> Incorrect operand for DEX was silently ignored
+
+The 10 we had passed as an operand are still on the stack, as `.s` will show. A
+`dump` of the code will show that the number was ignored, leading to code that
+will actually run correctly (again, addresses will vary):
+
+----
+1235  EA CA EA 60
+----
+
+These mistakes can surface further downstream when the incorrect value on the
+Data Stack causes problems.
+

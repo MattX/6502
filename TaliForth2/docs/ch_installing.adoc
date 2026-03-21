@@ -1,0 +1,146 @@
+=== Downloading
+
+Tali Forth 2 lives on GitHub(((GitHub))) at
+https://github.com/SamCoVT/TaliForth2. This is where you will always
+find the current version. You can either clone the code with
+git(((git))) or simply download it. To just test Tali Forth using the
+py65mon simulator, all you need is the binary file
+`taliforth-py65mon.bin`.
+
+=== Running
+
+Tali currently supports two simulators, py65mon and c65.  Py65mon will need to
+be downloaded separately (see below) and c65 comes with Tali in the c65
+folder.  If you have `gcc` and `make` installed, you can just type (in the
+main Tali folder):
+
+[source,bash]
+----
+make csim
+----
+
+This will compile the c65 simulator (if it hasn't been compiled yet) and run
+Tali Forth 2 in the simulator.
+
+To exit, you can type `bye` or use CTRL-C to break out of the simulator.
+
+Note: If running on Windows in a git bash shell, you will need to use winpty,
+e.g. `winpty make csim`.  This is only needed for the git bash shell.  Running
+Tali in c65 from the Windows command prompt or Windows Subsystem for Linux (WSL)
+works fine.
+
+==== Downloading the py65mon Simulator
+
+Tali was written to run out of the box on the py65mon simulator from
+https://github.com/mnaberez/py65.(((py65mon))) This is a Python(((Python)))
+program that should run on various operating systems.
+
+To install py65mon on Linux(((Linux))), use one of the following commands
+
+[source,bash]
+----
+# Install for only your user:
+pip install -U py65 --user
+
+# Install for all users:
+sudo pip install -U py65
+----
+
+If you don't have `pip`(((pip))) installed, you will have to add it first with
+something like `sudo apt-get install python-pip` (Ubuntu Linux).  Some systems
+use pip3 and you can run the above commands with pip3 instead of pip.
+
+If you are on windows, you will need to download and install Python 3
+first.  Once Python is installed, the above commands should work from
+a Windows command prompt.
+
+
+==== Running the Binary in py65mon
+
+To start Tali in the py65mon simulator, run:
+
+[source,bash]
+----
+py65mon -m 65c02 -r taliforth-py65mon.bin
+----
+
+Note that the option `-m 65c02` is required, because Tali Forth makes extensive
+use of the additional commands of the CMOS version and will not run on a stock
+6502 MPU.
+
+If you downloaded the full Tali Forth 2 source code and have `make`
+installed, you can also just type:
+
+[source,bash]
+----
+make sim
+----
+
+to run Tali Forth 2 in the py65mon simulator (it will run the above
+command for you).
+
+=== Installing on Your Own Hardware
+
+The Tali Forth project started out as a way to run Forth on my own 65c02
+computer, the Übersquirrel(((Übersquirrel))). Though it soon developed a life of
+its own, a central aim of the project is to provide a working, modern Forth that
+people can install on their projects.
+
+[#img_uebersquirrel]
+.The functioning Übersquirrel Mark Zero prototype, August 2013. Photo by Scot W. Stevenson
+image::pics/uebersquirrel.jpg[width=50%]
+
+==== The Platform Files
+
+For this to work, you need to go into the `platform` folder and create a new
+folder using the name of your 65C02 computer with a file named `platform.asm`
+inside.  It's recommended that you start with the files in the `platform/skeleton`
+folder by copying them into your folder.  These files are heavily commented with
+what you need to do to get Tali configured for your system.
+
+At a minimum, you'll need to edit the
+`platform/your_platform_name_here/platform.asm` file and write kernel routines
+for initializing your system, reading a character, printing a character, exiting
+tali, and optionally checking to see if a key is pressed.  See the `README.md`
+file in the the `platform` folder for details.  The skeleton files have kernel
+routines compatible with the py65mon and c65 (c65 is included with Tali) simulators.
+You can look at some of the other platforms to see code for real hardware.
+
+Once you have configured your platform.asm file in your platform folder, you
+can build a binary (typically programmed into an EEPROM) for your
+hardware with make.  If you made a platform folder named
+`mycomp`, then you should `cd` to the main Tali folder
+and run
+
+[source,bash]
+----
+make taliforth-mycomp.bin
+----
+
+The bin file will be created in the main folder.  You should, of
+course, replace the "mycomp" portion of that command with whatever you
+named your platform folder.
+
+=== Hardware Projects with Tali Forth 2
+
+This is a list of projects known to run Tali Forth 2. Please let me know if you
+want to have your project added to the list.
+
+- *Steckschwein* (https://steckschwein.de/) by Thomas Woinke and Marko
+  Lauke. A multi-board 8 MHz 65c02 system. Platform folder:
+  `platform/steckschwein` (26. Oct 2018)
+
+- *SamCo's SBC* (https://github.com/SamCoVT/SBC) by Sam Colwell.  A
+   single-board computer running at 4MHz.  Platform folder:
+   `platform/sbc` (29. Oct 2018)
+
+- *Neo6502* by Olimex LTD.  A commercial offering that pairs a real
+   65C02 processor with an RP2040 to give HDMI output and USB keyboard
+   support.  Platform folder: `platform/neo6502` (28. Apr 2024)
+
+- *The Sorbus Computer* (https://github.com/SvOlli/sorbus/) by Sven Oliver Moll
+   Uses a 65C02 and a Raspberry Pi Pico with a backplane for expansion cards
+   (has a sound card and VGA card).  Platform folder: `platform/sorbus` (27. Jun 2025)
+
+There are various benchmarks of Tali Forth 2 running different hardware at _The
+Ultimate Forth Benchmark_ (https://theultimatebenchmark.org/#sec-7).

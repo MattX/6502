@@ -1,0 +1,13 @@
+.*
+!.gitrepo
+!.gitignore
+*.pyc
+*.lof
+*.log
+*~
+c65-*.dat
+c65/c65
+c65/c65.exe
+**/*-listing.txt
+**/*-labelmap.txt
+**/*.bin

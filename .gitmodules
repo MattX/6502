@@ -1,9 +1,3 @@
 [submodule "pico-sdk"]
 	path = pico-sdk
 	url = https://github.com/raspberrypi/pico-sdk.git
-[submodule "TaliForth2"]
-	path = TaliForth2
-	url = git@github.com:MattX/TaliForth2.git
-[submodule "llvm-mos-sdk"]
-	path = llvm-mos-sdk
-	url = git@github.com:MattX/llvm-mos-sdk.git

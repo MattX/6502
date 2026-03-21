@@ -1,0 +1,989 @@
+[quote, Dennis M. Ritchie, Reflections on Software Research]
+Our intent was to create a pleasant computing environment
+for ourselves, and our hope was that others liked it. <<DMR>>
+
+=== Memory Map
+
+Tali Forth can be configured to work with various memory layouts and amounts of
+RAM and ROM. Out of the box, the version that runs with the py65 emulator looks
+like this:
+
+image::pics/memory_map.png[]
+
+Note that some of these values are hard-coded into the test suite; see the file
+`definitions.asm` for details.
+
+
+=== The Data Stack
+
+Tali Forth uses half of Zero Page((("Zero Page"))) for the system variables and
+Data Stack (DS).  In the default py65mon platform, this is the address range
+$00-$7F (it can be adjusted by changing `zpage` and `zpage_end` in the platform
+file).  This leaves the other half of the Zero Page for any kernel stuff the
+user might require. The DS grows from the end of Tali's space down towards the
+initial system variables. See the file `definitions.asm` for details. Because of
+the danger of underflow,(((underflow))) it is recommended that the user kernel's
+variables are kept closer to $0100 than to $007F.
+
+The X register((("X register"))) is used as the Data Stack Pointer (DSP). It
+points to the least significant byte of the current top element of the stack
+("Top of the Stack", TOS).
+
+NOTE: In the first versions of Tali Forth 1, the DSP pointed to the next _free_
+element of the stack. The new system makes detecting underflow easier and
+follows the convention in Liara Forth.(((Liara)))
+
+Initially, the DSP points to $78, not $7F as might be expected. This provides a
+few bytes as a "floodplain" for underflow.(((underflow))) The initial value of
+the DSP is defined as `dsp0` in the code.
+
+==== Single Cell Values
+
+Since the cell size is 16 bits, each stack entry consists of two bytes. They are
+stored little endian (least significant byte first). Therefore, the DSP points
+to the LSB of the current TOS. footnote:[Try reading that last sentence to a
+friend who isn't into computers. Aren't abbreviations fun?]
+
+Because the DSP points to the current top of the stack, the byte it points to
+after boot -- `dsp0` -- will never be accessed: The DSP is decremented first
+with two `dex` instructions, and then the new value is placed on the stack.
+This means that the initial byte is garbage and can be considered part of the
+floodplain.
+
+.Snapshot of the Data Stack with one entry as TOS. The DSP has been increased by one and the value written.
+image::pics/stack_diagram.png[]
+
+Note that the 65c02 system stack -- used as the Return Stack (RS) by Tali --
+pushes the MSB on first and then the LSB (preserving little endian), so the
+basic structure is the same for both stacks.
+
+Because of this stack design, the second entry ("next on stack", NOS) starts at
+`02,X` and the third entry ("third on stack", 3OS) at `04,X`.
+
+==== Underflow Detection
+
+Most native words come with built-in underflow detection. This is realized with
+a subroutine jump to specialized routines for the number of cells (not: bytes)
+that are expected on the Data Stack. For example, a word such as `drop` starts
+with the test:
+
+----
+                jsr underflow_1
+----
+
+Underflow detection adds three bytes and 16 cycles to the words that have it.
+However, it increases the stability of the program. There is an option for
+stripping it out when compiling user-defined words (see below).
+
+Tali Forth does not explicitly check for overflow, which in normal operation is too rare
+to justify the computing expense.  However, the underflow checks use a signed test which
+triggers both when the stack depth is negative and when the stack exceeds 128 bytes:
+also negative as far as the 65c02 is concerned!
+This means the maximum stack size is 64 words with an implicit overflow test at that depth.
+
+
+==== Double Cell Values
+
+The double cell is stored on top of the single cell.
+
+image::pics/double_cell.png[]
+
+If we run in the `c65` debugger
+we can see the double value `$12345678.` is stored in https://en.wikipedia.org/wiki/Endianness[NUXI order]:
+
+----
+hex  ok
+12345678.  ok
+.s <2> 5678 1234  ok
+<ctrl-c>
+PC f02e  nv-bdIzc  A 03 X 72 Y 00 SP f9 > m x+2.78
+       0  1  2  3  4  5  6  7   8  9  a  b  c  d  e  f   0123456789abcdef
+0070              34 12 78 56                           |    4.xV        |
+----
+
+Note this places the sign bit of the double cell number (*S*) at the beginning
+of the byte below the DSP.
+
+=== Dictionary
+
+Tali Forth follows the traditional model of a Forth dictionary -- a linked list
+of words terminated with a zero pointer. The headers and code can be separated
+to allow various tricks in the code.
+
+
+==== Elements of the Header
+
+Each word has a `name token` (nt, `nt_word` in the code) that points to the
+first byte of its header.  The header can vary in size from four to eight bytes,
+plus the length of the string containing the word's name.
+Conceptually the header looks like this:
+
+image::pics/header_simple.png[]
+
+In practice headers are usually generated using the `#nt_header` macro
+seen in `words/headers.asm`.
+This ensures that the various header fields are defined consistently.
+However, it's helpful to understand
+the header structure as you start tinkering with TaliForth's internals.
+
+The first byte of the header, at offset 0, is the **status byte**.
+It contains eight bit flags defined in the file `definitions.asm`:
+
+image::pics/status_flags.png[]
+
+Five of the flags define metadata for the word,
+while three control the format of the header itself.
+The builtin word `see` displays all of these flags for any Forth word,
+along with a calculated *UF* flag indicating whether the word includes an (optional) underflow check.
+
+The first three metadata flags -- *HC*, *NN* and *AN* -- are rarely needed for user words,
+while the last two -- *CO* and *IM* -- are useful for words with special compilation semantics:
+
+[horizontal]
+HC::
+  *Has CFA.* The word's first three bytes are considered the Code Field Area (CFA).
+  The CFA is normally a `jsr` to a data handler like `push_pfa`
+  and is followed by the Parameter Field Area (PFA) with any data used by the CFA.
+  The word `>body` uses this flag to skip past the CFA of words defined with `create`.
+NN::
+  *Never Native.* This Word is never inlined. This is usually because the word needs
+  the caller's return address for processing, or because the word
+  contains some non-relocatable data or code like the absolute `jmp` generated by flow control words.
+  TaliForth automatically flags user words as *NN* when it detects `jmp` instructions.
+AN::
+  *Always Native.* This word must always be inlined, usually because it depends on the
+  return stack state.  Setting both *NN* and *AN* together indicates a word which can be either
+  inlined or not with a specific return stack prologue/epilogue that is removed when inlined.
+  This is limited to the words `R>`, `R@`, `>R`, `2R>`, `2R@`, and `2>R`.
+IM::
+  *Immediate.* This word is executed immediately during definitions of new words.
+CO::
+  *Compile Only.* This word may only be used inside definitions of new words.
+
+The *NN* and *AN* flags are interpreted together like this:
+
+[%autowidth]
+|===
+| NN | AN | Interpretation
+
+| 0 | 0 | Normal word called by JSR (non-native) or inlined (native).  No flag.
+| 1 | 0 | Word can only be called by JSR (never native; NN).
+| 0 | 1 | Word can only be inlined (always native; AN).
+| 1 | 1 | Normal word with return stack juggling removed when inlining (ST).
+
+|===
+
+The last three flags -- *DC*, *LC* and *FP* -- control the header layout to optimize memory usage,
+often allowing us to halve the header from eight to four bytes (not counting the name string).
+This full picture of the header illustrates how they work:
+
+image::pics/header_detail.png[]
+
+[horizontal]
+DC::
+  *Disjoint code.* When DC=1, the word's code can be located
+  anywhere in memory, with the xt_word value added to the header.
+  However when DC=0 the word's code immediately follows the header,
+  reducing the header size by two bytes.  Most `:` words
+  added to the dictionary use this format, since compiled code
+  is added to the dictionary immediately after the header.
+LC::
+  *Long code.* The length of the word body can be recorded in
+  either one or two bytes.  The length is only required
+  if the word is inlined, and for `DISASM`.  If we don't care about
+  inlining long words we can save some complexity by always using one byte
+  and just reporting a maximum length of 255 (see `fixup_long_word`).
+FP::
+  *Far previous.* Normally we store a two byte `nt_prev` pointer
+  for the previous header in the linked list.
+  However, if the previous header is within the preceding 256 bytes,
+  we only need to store the LSB and can infer the MSB, saving a byte.
+  This is often the case with small `:` words that are consecutively
+  added to the dictionary, and with builtin words where we define
+  all headers consecutively.
+
+The length of the header, excluding the name itself, is 4 + 2*DC + LC + FP bytes.
+The specific position of these flags in the status byte makes this easy to calculate in assembly:
+
+----
+        lda flags       ; start with status flags in the accumulator
+        and #DC+LC+FP   ; mask the three header length bits
+        lsr             ; shift FP to carry flag, so Acc = 2*DC + LC
+        adc #4          ; header length is 4 + 2*DC + LC + FP bytes
+----
+
+NOTE: We could also reorganize the built-in dictionary to save a little more memory
+but currently have preferred readability, keeping word headers disjoint
+from their assembly implementations.
+
+The second byte of the header -- following the status byte -- is the **length of the word's name string**, which
+is currently limited to 31 characters.
+
+The length byte is followed by the **pointer to the previous header** in the linked
+list, i.e. the name token of that word. A 0000 in this position
+signals the beginning of the linked list, which by convention is the word `bye` for
+the native code words.  If the `FP` flag is zero we only store the LSB of the previous header,
+and infer the MSB depending on whether its LSB is less than or greater than that of the
+current header.
+
+Next is the current word's **execution token** (xt, `xt_word`) which
+points to the start of the actual assembly code. Some words that have the same
+functionality point to the same code block.   If the `DC` flag is zero we omit
+this pointer and calculate it based on the length of the header.
+
+NOTE: Because Tali uses a subroutine threaded model (STC), the classic Forth
+distinction between the Code Field Area (CFA) and the Parameter Field Area
+(PFA, also Data Field Area) is meaningless -- it's all "payload".
+
+The next field stores the **length of the word's code** (`z_word` - `xt_word`) as either
+one or two bytes based on the `LC` flag.  This is used for native
+compilation of the word (if allowed and requested).
+
+Finally we have the **name string** at offset between 4 and 8. The string is _not_
+zero-terminated.  Tali Forth lowercases names as they are copied into the
+dictionary and also lowercases during lookup, so `quarian` is the same word as
+`QUARIAN`.  If the name in the dictionary is directly modified, it is important
+to ensure that only lowercase letters are used, or else Tali will not be able
+to find that word.
+
+==== Structure of the Header List
+
+Tali Forth distinguishes between three different word sources: The **native
+words** that are hard-coded in the `words/*.asm` files,
+any **native words** specific to the platform in `platform/xxx/platform_words.asm`,
+and any **Forth words** defined for the platform in `platform/xxx/platform_forth.fs`,
+which are compiled from source at run-time when Tali Forth starts up.
+
+Tali has an unusually high number of native words in an attempt to make the
+Forth as fast as possible on the 65c02 and compensate for the disadvantages of
+the subroutine threading model (STC). The first word on that list -- the one
+that is checked first -- is always `drop`, the last one -- the one checked for
+last -- is always `bye`. The words which are (or are assumed to be) used more
+than others come first. Since humans are slow, words that are used more
+interactively like `words` always come later.
+
+The list of Forth words ends with the intro strings. This functions as a
+primitive form of a self-test: If you see the welcome message, compilation of
+the Forth words worked.
+
+
+=== Input
+
+Tali Forth follows the ANS Forth input model with `refill` instead of older
+forms. There are four possible input sources:
+
+* The keyboard ("user input device", can be redirected)
+* A character string in memory
+* A block
+* A text file
+
+To check which one is being used, we first check `blk` which gives us the number
+of a mass storage block being used, or 0 for the one of the other input sources.
+In the second case, we use `source-id` to find out where input is coming from:
+
+.Non-block input sources
+[%autowidth]
+|===
+| Value | Source
+
+| 0 | keyboard (can be redirected)
+| -1 | string in memory
+| `n` | file-id
+
+|===
+
+The input can be redirected by storing the address of your routine in
+the memory location given by the word `input`.  Tali expects this
+routine to wait until a character is available and to return the
+character in A, rather than on the stack.
+
+The output can similarly be redirected by storing the address of your
+routine in the memory location given by the word `output`.  Tali
+expects this routine to accept the character to output in A, rather than
+on the stack.
+
+Both the input routine and output routine may use the tmp1, tmp2, and tmp3
+memory locations (defined in assembly.asm), but they need to push/pop them so
+they can restore the original values before returning.  The X and Y registers
+also need to be preserved.  If the input or output routines are written in
+Forth, extra care needs to be taken because many of the Forth words use these
+tmp variables and it's not immediately obvious without checking the assembly for
+each word.
+
+==== Booting
+
+The initial commands after reboot flow into each other: `cold` to `abort` to
+`quit`. This is the same as with pre-ANS Forths.  However, `quit` now calls
+`refill` to get the input.  `refill` does different things based on which of the
+four input sources (see above) is active:
+
+[horizontal]
+Keyboard entry::
+	This is the default. Get line of input via `accept` and return `true`
+	even if the input string was empty.
+`evaluate` string:: Return a `false` flag
+Input from a block:: Blocks are evaluated as a 1024 byte string.
+Input from a file:: _Not implemented at this time_
+
+
+==== The Command Line Interface (CLI)
+
+Tali Forth accepts input lines of up to 256 characters. The address of the
+current input buffer is stored in `cib`. The length of the current buffer is
+stored in `ciblen` -- this is the address that `>in` returns.  `source` by
+default returns `cib` and `ciblen` as the address and length of the input
+buffer.
+
+
+==== The Word `evaluate`
+
+The word `evaluate`is used to execute commands that are in a string. A simple example:
+
+----
+s" 1 2 + ." evaluate
+----
+
+Tali Forth uses `evaluate` to load high-level Forth words from the platform's
+`platform_forth.fs`, if present.  Forth code in these files has all comments removed and all
+whitespace replaced with a single space between words.  This compact version
+is assembled directly into the ROM image as a string that will be evaluated at
+startup.  (Also see `evaluate*` if you need to execute multi-line code containing comments.)
+
+=== The Words `create` and `does>`
+
+The tandem of words `create` and `does>` is the most complex, but also most
+powerful part of Forth. Understanding how it works in Tali Forth is important
+if you want to be able to modify the code. In this text, we walk through the
+generation process for a subroutine threaded code (STC) such as Tali Forth.
+
+NOTE: For a more general explanation, see Brad Rodriguez' series of articles at
+http://www.bradrodriguez.com/papers/moving3.htm There is a discussion of this
+walkthrough at http://forum.6502.org/viewtopic.php?f=9&t=3153
+
+We start with the following standard example, a high-level Forth version of the
+word `constant`.
+
+----
+: constant  ( "name" -- )  create , does> @ ;
+----
+
+NOTE: Tali Forth 2 optimizes the implementation of `constant` (and `variable`, and `value`) to compile
+standard literals directly, avoiding the overhead of the `create` mechanism described here.
+However, the high-level definition above remains the standard example for understanding
+how `create` and `does>` interact, so we will use it for this walkthrough.
+
+We examine this in three phases or "sequences", following Rodriguez (based on
+<<DB>>).
+
+==== Sequence 1: Compiling the Word `constant`
+
+`constant` is a defining word, one that makes new words. In pseudocode,
+ignoring any compilation to native 65c02 assembler, the above compiles to:
+
+----
+        jsr CREATE
+        jsr COMMA
+        jsr (DOES>)         ; from DOES>
+   a:   jsr DODOES          ; from DOES>
+   b:   jsr FETCH
+        rts
+----
+
+To make things easier to explain later, we've added the labels `a` and
+`b` in the listing.
+
+NOTE: This example uses the traditional word `(does>)`, which in Tali Forth 2
+is actually an internal routine that does not appear as a separate word. This
+version is easier to explain.
+
+`does>` is an immediate word that adds not one, but two subroutine jumps, one
+to `(does>)` and one to `dodoes`, which is a pre-defined system routine like
+`push_pfa`. We'll discuss those later.
+
+In Tali Forth, many words are "hand-compiled" to produce more efficient assembly.
+For example, the word `bounds` could be defined in forth as
+
+----
+: bounds over + swap ;
+----
+
+but rather than simply calling the relevant forth words like
+
+----
+        jsr w_over
+        jsr w_plus
+        jsr w_swap
+----
+
+we write an optimized assembler version ourselves.
+(Compare the actual `bounds` implementation in `words/tali.asm`.)
+There is often a tradeoff between speed and size:
+in this case the simple approach is 9 bytes but
+takes many more cycles to execute than the 21 byte hand-crafted version.
+
+
+==== Sequence 2: Executing the Word `constant`
+
+Now when we execute
+
+----
+42 constant life
+----
+
+This pushes the `rts` of the calling routine -- call it "main" -- to the
+65c02's stack (the Return Stack, as Forth calls it), which now looks like this:
+
+----
+        (1) rts                 ; to main routine
+----
+
+Without going into detail, the first two subroutine jumps of `constant` give us
+this word:
+
+----
+        (Header "LIFE")
+        jsr push_pfa            ; in CFA, from LIFE's CREATE
+        4200                    ; in PFA (little-endian)
+----
+
+Next, we `jsr` to `(does>)`. The address that this pushes on the Return Stack
+is the instruction of `constant` we had labeled `a`.
+
+----
+        (2) rts to CONSTANT ("a")
+        (1) rts to main routine
+----
+
+Now the tricks start. `(does>)` takes this address off the stack and uses it to
+replace the `push_pfa jsr` target in the CFA of our freshly created `life` word.
+We now have this:
+
+----
+        (Header "LIFE")
+        jsr a                   ; in CFA, modified by (DOES>)
+   c:   4200                    ; in PFA (little-endian)
+----
+
+Note we added a label `c`. Now, when `(does>)` reaches its own `rts`, it finds
+the `rts` to the main routine on its stack. This is a Good Thing(TM), because it
+aborts the execution of the rest of `constant`, and we don't want to do
+`dodoes` or `fetch` now. We're back at the main routine.
+
+
+==== Sequence 3: Executing `life`
+
+Now we execute the word `life` from our "main" program. In a STC Forth
+such as Tali Forth, this executes a subroutine jump.
+
+----
+        jsr LIFE
+----
+
+The first thing this call does is push the return address to the main routine
+on the 65c02's stack:
+
+----
+        (1) rts to main
+----
+
+The CFA of `life` executes a subroutine jump to label `a` in `constant`. This
+pushes the `rts` of `life` on the 65c02's stack:
+
+----
+        (2) rts to LIFE ("c")
+        (1) rts to main
+----
+
+This `jsr` to a lands us at the subroutine jump to `dodoes`, so the return
+address to `constant` gets pushed on the stack as well. We had given this
+instruction the label `b`. After all of this, we have three addresses on the
+65c02's stack:
+
+----
+        (3) RTS to CONSTANT ("b")
+        (2) RTS to LIFE ("c")
+        (1) RTS to main
+----
+
+`dodoes` pops address `b` off the 65c02's stack and puts it in a nice safe place
+on Zero Page, which we'll call `z`. More on that in a moment. First, `dodoes`
+pops the `rts` to `life`. This is `c`, the address of the PFA or `life`, where
+we stored the payload of this constant. Basically, `dodoes` performs a `push_pfa`
+here, and pushes `c` on the Data Stack. Now all we have left on the 65c02's
+stack is the `rts` to the main routine.
+
+----
+        [1] RTS to main
+----
+
+This is where `z` comes in, the location in Zero Page where we stored address
+`b` of `constant`. Remember, this is where the PFA of `constant` begins, the
+`fetch` command we had originally codes after `does>` in the very first
+definition. The really clever part: We perform an indirect `jmp` -- not a
+`jsr`! -- to this address.
+
+----
+        jmp (z)
+----
+
+Now the little payload program of `constant` is executed, the subroutine jump
+to `fetch`. Since we just put the PFA (`c`) on the Data Stack, `fetch` replaces
+this by 42, which is what we were aiming for all along.  And since `constant`
+ends with a `rts`, we pull the last remaining address off the 65c02's stack,
+which is the return address to the main routine where we started. And that's
+all.
+
+Put together, this is what we have to code:
+
+`does>`:: Compiles a subroutine jump to `(does>)`, then compiles a subroutine
+jump to `dodoes`.
+
+`(does>)`:: Pops the stack (address of subroutine jump to `dodoes` in
+`constant`, increase this by one, replace the original `push_pfa` jump target in
+`life`.
+
+`dodoes`:: Pop stack (PFA of `constant`), increase address by one, store on
+Zero Page; pop stack (PFA of `life`), increase by one, store on Data Stack;
+`jmp` to address we stored in Zero Page.
+
+Remember we have to increase the addresses by one because of the way `jsr`
+stores the return address for `rts` on the stack on the 65c02: It points to the
+third byte of the `jsr` instruction itself, not the actual return address. This
+can be annoying, because it requires a sequence like:
+
+----
+        inc z
+        bne +
+        inc z+1
+*
+        (...)
+----
+
+Note that with most words in Tali Forth, as any STC Forth, the distinction
+between PFA and CFA is meaningless or at least blurred, because we go native
+anyway. It is only with words generated by `create` and `does>` where this
+really makes sense.
+
+=== Control Flow
+
+
+==== Branches
+
+For `if` and `then`, we need to compile something called a "conditional forward
+branch", traditionally called `0branch`. In Tali Forth, this is not visible to
+the user as an actual, separate word anymore, but we can explain things better
+if we assume it is still around.
+
+At run-time, if the value on the Data Stack is false (flag is zero), the branch
+is taken ("branch on zero", therefore the name). Except that we don't have the
+target of that branch yet -- it will later be added by `then`. For this to work,
+we remember the address after the `0branch` instruction during the compilation
+of `if`. This is put on the Data Stack, so that `then` knows where to compile
+it's address in the second step. Until then, a dummy value is compiled after
+`0branch` to reserve the space we need.
+
+NOTE: This section and the next one are based on a discussion at
+http://forum.6502.org/viewtopic.php?f=9\&t=3176 see there for more details.
+Another take on this subject that handles things a bit differently is at
+http://blogs.msdn.com/b/ashleyf/archive/2011/02/06/loopty-do-i-loop.aspx
+
+In Forth, this can be realized by
+
+----
+: if  postpone 0branch here 0 , ; immediate
+----
+
+and
+
+----
+: then  here swap ! ; immediate
+----
+
+Note `then` doesn't actually compile anything at the location in memory where
+it is at. It's job is simply to help `if` out of the mess it has created. If we
+have an `else`, we have to add an unconditional `branch` and manipulate the
+address that `if` left on the Data Stack. The Forth for this is:
+
+----
+: else  postpone branch here 0 , here rot ! ; immediate
+----
+
+Note that `then` has no idea what has just happened, and just like before
+compiles its address where the value on the top of the Data Stack told it to --
+except that this value now comes from `else`, not `if`.
+
+==== Loops
+
+Loops are more complicated, because we have `do`, `?do`, `loop`, `+loop`,
+`unloop`, and `leave` to think about. These can involve up to three branches: One
+for the normal looping action (`loop` and `+loop`), one to skip over the loop at
+the beginning (`?do`) and one to skip out of the loop (`leave`).
+
+Like many other forth implementations,
+Tali Forth 2 originally used the return stack to manage loop control,
+including the loop exit address and the loop step and limit values.
+However this required extensive stack juggling which slowed loop performance.
+After https://github.com/SamCoVT/TaliForth2/issues/53[investigating several alternatives]
+we switched to a separate loop control stack.
+Each loop uses a four byte (double word) loop control block (LCB) to store
+the current loop limits.
+All branch addresses including the loop exit are now directly compiled into code
+rather than stored on the stack.
+
+NOTE: In order to simplify the loop completion check after each iteration,
+we don't store the actual loop index and limit values in the LCB.
+Instead we calculate a fudge factor (sometimes referred to as 'fufa' in the code)
+that makes every loop appear to finish at exactly $8000, and use this to adjust the loop index.
+This lets us use a simple 16 bit overflow test to see if we're done.
+One side effect is that the `i` and `j` words get a little more complicated.
+For more details see http://forum.6502.org/viewtopic.php?f=9&t=2026
+and the `do_runtime` implementation.
+
+Remembering state across nested loops means a stack of LCBs.
+Whereas the return stack grows downward from $1ff, our current loop control stack
+grows upward from $100.
+The zero-page `loopctrl` byte forms our loop stack pointer,
+limiting us to at most 64 nested loops if the return stack is empty.
+We also cache the least significant byte of the active loop index
+in the zero-page `loopidx0` which often lets us avoid indexed access to the LCB.
+
+The key to staying sane while designing these constructs is to make
+a list of what we should happen at compile time and what at run time.
+Let's start with a high-level view of what happens at run time to manage a `do` loop:
+
+- `do` adds four to the loop control stack pointer in `loopctrl` to assign a new LCB.
+  It writes the initial loop index and offset to the LCB and
+  updates the cached `loopidx0`.  `?do` is very similar.
+
+- most of the time `loop` just increments the cached `loopidx0`.  It only touches
+  the LCB when the low byte overflows.
+
+- `+loop` updates `loopidx0` and (if needed) the high byte in the LCB.
+  It only touches the LCB when we have a step size larger than 255 or an overflow
+  on the low index byte.
+
+- `unloop` subtracts four from `loopctrl` to drop the current LCB.
+  It caches the low byte of the now current loop index in `loopidx0`
+  so that any enclosing loop sees the correct value.
+
+- the `i` and `j` words use 16-bit math to calculate the actual loop index from the LCB
+  offset and fudge factor values.  Although it's certainly not portable forth,
+  our LCB approach means that `i` and `j` can be safely referenced by words called within a loop.
+  (This isn't the case in Forths that use the return stack for loop control.)
+
+- `leave` simply jumps out of the loop to an address hard-coded at compile time.
+
+And what about compile time?
+
+- `do` emits the runtime code to set up the loop from the limit values.
+  The `?do` variant includes a conditional jump that skips the loop entirely, dropping the limits.
+  Since we won't know the exit address until we're finished compiling
+  the loop body, we emit placeholder bytes and save the placeholder's address on the stack
+  so `loop` can update it later.
+  We also stash the current `loopleave` variable so that we
+  can handle `leave` in nested loops (see below).
+
+- `loop` and `+loop` generate the runtime code that increment the loop offset
+  with an efficient check for whether we've crossed the completion limit.
+  Now that we've finished compiling the loop contents we can
+  also patch up the exit addresses needed for `?do` and `leave`.
+
+- `unloop`, `i`, and `j` don't have any compile-time behavior.
+
+- `leave` also needs to jump to the end of the loop but we don't yet
+  know where that is.
+  Because `leave` can appear multiple times in a loop,
+  we need some trickery to keep a list of all `leave` placeholders to update.
+  The address of the first `leave` placholder is stored in a variable called `loopleave`.
+  Then the next `leave` placeholder address is stored *as* the placeholde value of the previous `leave`!
+  This can be repeated indefinitely and forms a linked list.
+  Once we've finished compiling `loop` can walk the list and write the exit address into each placeholder.
+  (To safely handle nested loops we also need to push and pop `loopleave` whenever we start or finish
+  compiling a new loop.)
+
+It's clear that all the complicated stuff happens at compile-time.
+This is good, because we only have to do that once for each loop.
+In Tali Forth all of loop control is coded in assembler.
+You can see all of the gory details of the loop word implementations in `words/core.asm`.
+
+=== Native Compiling
+
+In a pure subroutine threaded code, higher-level words are merely a series of
+subroutine jumps. For instance, the Forth word `[char]`, formally defined in
+high-level Forth as
+
+----
+: [char] char postpone literal ; immediate
+----
+
+in assembler is simply
+
+----
+                jsr xt_char
+                jsr xt_literal
+----
+
+as an immediate, compile-only word. There are two problems with this method:
+First, it is slow, because each `jsr`-`rts` pair consumes four bytes and 12
+cycles as overhead. Second, for smaller words, the jumps use far more bytes than
+the actual code. Take for instance `drop`, which in its naive form is simply
+
+----
+                inx
+                inx
+----
+
+for two bytes and four cycles. If we jump to this word as is assumed with pure
+subroutine threaded Forth, we add four bytes and 12 cycles -- double the space
+and three times the time required by the actual working code.
+
+(In practice, it's even worse, because `drop` checks for underflow. The actual
+assembler code is
+
+----
+                jsr underflow_1
+
+                inx
+                inx
+----
+
+for five bytes and 20 cycles. We'll discuss the underflow checks further below.)
+
+To get rid of this problem, Tali Forth supports **native compiling** (also known
+as inlining). The system variable `nc-limit` sets the threshold up to which a
+word will be included not as a subroutine jump, but in machine language. Let's
+start with an example where `nc-limit` is set to zero, that is, all words are
+compiled as subroutine jumps. Take a simple word such as
+
+----
+: aaa 0 drop ;
+----
+
+when compiled with an `nc-limit` of 0 and check the actual code with `see`
+
+----
+see aaa
+nt: 890  xt: 89B
+flags: CO 0 IM 0 AN 0 NN 0 HC 0 | UF 0 ST 0
+size (decimal): 6
+
+089B  20 59 9E 20 53 86   Y. S.
+
+89B   9E59 jsr     0
+89E   8653 jsr     drop
+----
+
+(The actual addresses might vary). Our word `aaa` consists of two subroutine
+jumps, one to zero and one to `drop`. Now, if we increase the threshold to 20
+and define a new word with the same instructions with
+
+----
+20 nc-limit !
+: bbb 0 drop ;
+----
+
+we get different code:
+
+----
+see bbb
+nt: 8A2  xt: 8AD
+flags: CO 0 IM 0 AN 0 NN 0 HC 0 | UF 0 ST 0
+size (decimal): 11
+
+08AD  CA CA 74 00 74 01 20 B5  D8 E8 E8  ..t.t. . ...
+
+8AD        dex
+8AE        dex
+8AF      0 stz.zx
+8B1      1 stz.zx
+8B3   D8B5 jsr     1 STACK DEPTH CHECK
+8B6        inx
+8B7        inx
+----
+
+Even though the definition of `bbb` is the same as `aaa`, we have totally
+different code: The number 0000 is pushed to the Data Stack (the first six
+bytes), then we check for underflow (the next three), and finally we
+`drop` by moving X register, the Data Stack Pointer. Our word is definitely
+longer, but have just saved 12 cycles.
+
+To experiment with various parameters for native compiling, the Forth word
+`words&sizes` is included in `user_words.fs` (but commented out by default).
+The Forth is:
+
+----
+: words&sizes ( -- )
+        latestnt
+        begin
+                dup
+        0<> while
+                dup name>string type space
+                dup wordsize u. cr
+                2 + @
+        repeat
+        drop ;
+----
+
+An alternative is `see` which also displays the length of a word. One way or
+another, changing `nc-limit` should show differences in the Forth
+words.
+
+While a new word may have built-in words natively compiled into it, all new
+words are flagged Never-Native by default because a word needs to meet some
+special criteria to be safe to native compile.  In particular, the word cannot
+have any control structures (if, loop, begin, again, etc) and, if written in
+assembly, cannot have any JMP instructions in it (except for error handling,
+such as underflow detection).
+
+If you are certain your new word meets these criteria, then you can enable
+native compilation of this word into other words by invoking the word
+`allow-native` or the word `always-native` immediately after the definition of
+your new word.  The `allow-native` will use the `nc-limit` value to determine
+when to natively compiled just like it does for the built-in words, and
+`always-native` will always natively compile regardless of the setting of
+`nc-limit`.
+
+==== Return Stack Special Cases
+
+There are a few words that cause problems with subroutine threaded code (STC):
+Those that access the Return Stack such as `r>`, `>r`, `r@`, `2r>`, and `2>r`.
+We first have to remove the return address on the top of the stack, only to
+replace it again before we return to the caller. This mechanism would normally
+prevent the word from being natively compiled at all, because we'd try to remove
+a return address that doesn't exit.
+
+This becomes clearer when we examine the code for `>r` (comments
+removed):
+
+----
+xt_r_from:
+                pla
+                sta tmptos
+                ply
+
+                ; --- CUT FOR NATIVE CODING ---
+
+                dex
+                dex
+                pla
+                sta 0,x
+                pla
+                sta 1,x
+
+                ; --- CUT FOR NATIVE CODING ---
+
+                phy
+                lda tmptos
+                pha
+
+z_r_from:       rts
+----
+
+The first three and last three instructions are purely for housekeeping with
+subroutine threaded code. To enable this routine to be included as native code,
+they are removed when native compiling is enabled by the word `compile,` This
+leaves us with just the six actual instructions in the center of the routine to
+be compiled into the new word.
+
+==== Underflow Stripping
+
+As described above, every underflow check adds three bytes to the word being
+coded. Stripping this check by setting the `strip-underflow` system variable
+(named `uf-strip` in the source code) to `true` simply removes these three bytes
+from new natively compiled words.
+
+It is possible, of course, to have lice and fleas at the same time. For
+instance, this is the code for `>r`:
+
+----
+xt_to_r:
+                pla
+                sta tmptos
+                ply
+
+                ; --- CUT HERE FOR NATIVE CODING ---
+
+                jsr underflow_1
+
+                lda 1,x
+                pha
+                lda 0,x
+                pha
+
+                inx
+                inx
+
+                ; --- CUT HERE FOR NATIVE CODING ---
+
+                phy
+                lda tmptos
+                pha
+
+z_to_r:         rts
+----
+
+This word has _both_ native compile stripping and underflow detection. However,
+both can be removed from newly native code words, leaving only the eight byte
+core of the word to be compiled.
+
+==== Enabling Native Compiling on New Words
+
+By default, user-defined words are flagged with the Never-Native (NN)
+flag.  While the words used in the definition of the new word might
+have been natively compiled into the new word, this new word will
+always be compiled with a JSR when used in future new words.  To
+override this behavior and allow a user-defined word to be natively
+compiled, the user can use `allow-native` word to remove the NN flag
+and allow native compiling if the word is smaller than
+`nc-limit`. Alternatively, the `always-native` word will set the
+Always-Native (AN) flag and force native compilation, regardless of
+`nc-limit`.  These modifiers go just after the definition has been
+completed (with a semicolon).  An example of doing this might be:
+
+----
+: double dup + ; always-native
+----
+
+Please note that adding the always-native flag to a word overrides the
+never-native flag.
+
+WARNING: Do not apply `allow-native` or `always-native` to a word that
+has any kind of control structures in it, such as `if`, `case` or any
+kind of loop.  If these words ever get native compiled, the JMP
+instructions used in the control structures are copied verbatim,
+causing them to jump back into the original words.
+
+WARNING: When adding your own words in assembly, if a word has a `jmp`
+instruction in it, it should have the NN (Never Native) flag set in
+the headers.asm file and should never have the AN (Always Native) flag
+set.
+
+=== `cmove`, `cmove>` and `move`
+
+The three moving words `cmove`, `cmove>` and `move` show subtle differences
+that can trip up new users and are reflected by different code under the hood.
+`cmove` and `cmove>` are the traditional Forth words that work on characters
+(which in the case of Tali Forth are bytes), whereas `move` is a more modern
+word that works on address units (which in our case is also bytes).
+
+If the source and destination regions show no overlap, all three words work the
+same. However, if there is overlap, `cmove` and `cmove>` demonstrate a behavior
+called "propagation" or "clobbering" : Some of the characters are overwritten.
+`move` does not show this behavior. This example shows the difference:
+
+----
+create testbuf  char a c,  char b c,  char c c,  char d c,  ( ok )
+testbuf 4 type  ( abcd ok )
+testbuf dup char+ 3  cmove  ( ok )
+testbuf 4 type ( aaaa ok )
+----
+
+Note the propagation in the result. `move`, however, doesn't propagate.
+The last two lines would be:
+
+----
+testbuf dup char+ 3  move  ( ok )
+testbuf 4 type  ( aabc ok )
+----
+
+In practice, `move` is usually what you want to use.

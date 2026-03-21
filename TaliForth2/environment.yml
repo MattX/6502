@@ -1,0 +1,7 @@
+name: taliforth
+dependencies:
+  - pip
+  - python=3
+  - pip:
+      - py65
+      - pyasyncore

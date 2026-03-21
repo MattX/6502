@@ -224,7 +224,8 @@ There is no formal test suite. Testing is done manually:
 
 ## Development Tips
 
-- The Pico SDK is a git submodule at `pico-sdk/`. Run `git submodule update --init` after cloning.
+- The Pico SDK is a git submodule at `pico-sdk/`. Run `git submodule update --init` after cloning if it is missing.
+- `TaliForth2/` and `llvm-mos-sdk/` are vendored with `git-subrepo`; update them with `git subrepo pull <dir>`.
 - `BRIDGE_DEBUG=1` enables verbose protocol logging on the Pico's USB serial port.
 - The Rust `shein` app compiles on any OS but SPI/GPIO hardware is Linux-only; stub paths let you develop the TUI locally.
 - The emulator's ROM can be loaded via the browser UI as a binary file.

@@ -1,0 +1,61 @@
+                   RAM
+   $0000  +---------------------+  ram_start, zpage, user0
+          | ZP System Variables |  Tali Zero Page System Variables
+          +---------------------+
+          |                     |
+          |  ^   Data Stack     |  <-- dsp
+          |  |                  |
+   $0078  +---------------------+  dsp0, stack
+          |    $80 to $100      |
+          |      AVAILABLE      |
+          | (Not used by Tali)  |
+          |              cYEL   |
+   $0100  +---------------------+
+          |                     |
+          |  ^  Return Stack    |  <-- rsp
+          |  |                  |
+   $0200  +---------------------+rsp0, buffer, buffer0
+          |  |                  |
+          |  v  Input Buffer    |
+          |                     |
+   $0300  +---------------------+   cp0
+          |+------------------+ |
+          || RAM System Vars  | |Tali RAM System Variables
+          || 256B             | |
+          |+------------------+ |
+          || Block Buffer     | |
+          || 1024B            | |
+          |+------------------+ |
+          |     Dictionary      |
+          |  |    (RAM)         |
+          |  v                  |
+          |=====================|  <-- cp
+          |                     |
+          |                     |  
+          +---------------------+  cp_end
+          |                     |
+          |   ACCEPT history    |
+          |                     |
+   $7FFF  +---------------------+  ram_end
+                ROM (or RAM)
+   $8000  +---------------------+ forth, code0
+          |                     |  
+          |                     |
+          |                     |
+          |     Tali Forth      |
+          |      (24 KiB)       |
+          |                     |
+          |                     |
+   $E000  +---------------------+
+          |      AVAILABLE      |kernel_putc, kernel_getc   
+          |   (User's Kernel)   |
+          |               cYEL  |
+   $F000  +---------------------+
+          |   I/O addresses     | on py65mon simulator
+          +---------------------+
+          |      AVAILABLE      |
+          |   (User's Kernel)   |
+          |               cYEL  |
+   $FFFA  +---------------------+     
+          |    65c02 vectors    |
+   $FFFF  +---------------------+
