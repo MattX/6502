@@ -186,6 +186,27 @@ impl BridgePort {
         std::mem::take(&mut self.packet_log)
     }
 
+    pub fn status_summary(&self) -> String {
+        let state = match &self.state {
+            PortState::Idle => "Idle".to_string(),
+            PortState::WriteLen { device } => format!("WriteLen(dev={})", device),
+            PortState::WriteData { device, remaining, .. } => {
+                format!("WriteData(dev={}, rem={})", device, remaining)
+            }
+            PortState::ReadData { buf, pos } => {
+                format!("ReadData({}/{})", pos, buf.len)
+            }
+        };
+        let nb = match &self.netboot {
+            Some(nb) => format!("{}/{}", nb.offset, nb.data.len()),
+            None => "none".to_string(),
+        };
+        format!(
+            "{{\"state\":\"{}\",\"keyboard\":{},\"echo\":{},\"netboot\":\"{}\"}}",
+            state, self.keyboard_in.len(), self.echo.len(), nb
+        )
+    }
+
     fn write_byte(&mut self, value: u8) {
         self.state = match std::mem::replace(&mut self.state, PortState::Idle) {
             PortState::Idle => {

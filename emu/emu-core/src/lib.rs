@@ -2,6 +2,8 @@ mod bus;
 mod disassemble;
 mod via;
 
+use std::collections::HashSet;
+
 use bus::MattbrewBus;
 use mos6502::cpu::CPU;
 use mos6502::instruction::Cmos6502;
@@ -10,6 +12,8 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen]
 pub struct Emulator {
     cpu: CPU<MattbrewBus, Cmos6502>,
+    breakpoints: HashSet<u16>,
+    breakpoint_hit: bool,
 }
 
 #[wasm_bindgen]
@@ -19,7 +23,7 @@ impl Emulator {
         console_error_panic_hook::set_once();
         let mut cpu = CPU::new(MattbrewBus::new(), Cmos6502);
         cpu.reset();
-        Emulator { cpu }
+        Emulator { cpu, breakpoints: HashSet::new(), breakpoint_hit: false }
     }
 
     pub fn reset(&mut self) {
@@ -35,11 +39,12 @@ impl Emulator {
         self.cpu.single_step()
     }
 
-    /// Execute instructions until the cycle budget is exhausted or
-    /// a terminal write occurs (so the UI can refresh immediately).
+    /// Execute instructions until the cycle budget is exhausted,
+    /// a terminal write occurs, or a breakpoint is hit.
     /// Returns the number of cycles actually consumed.
     pub fn run_for_cycles(&mut self, budget: u32) -> u32 {
         self.cpu.memory.bridge.terminal_dirty = false;
+        self.breakpoint_hit = false;
         let start = self.cpu.cycles;
         let target = start + budget as u64;
         while self.cpu.cycles < target {
@@ -47,6 +52,12 @@ impl Emulator {
                 break;
             }
             if self.cpu.memory.bridge.terminal_dirty {
+                break;
+            }
+            if !self.breakpoints.is_empty()
+                && self.breakpoints.contains(&self.cpu.registers.program_counter)
+            {
+                self.breakpoint_hit = true;
                 break;
             }
         }
@@ -161,5 +172,29 @@ impl Emulator {
     /// Disassemble `lines` instructions starting at `addr`.
     pub fn disassemble_at(&self, addr: u16, lines: u32) -> String {
         disassemble::disassemble(&self.cpu.memory, addr, lines)
+    }
+
+    // --- Bridge status ---
+
+    pub fn bridge_status(&self) -> String {
+        self.cpu.memory.bridge.status_summary()
+    }
+
+    // --- Breakpoints ---
+
+    pub fn add_breakpoint(&mut self, addr: u16) {
+        self.breakpoints.insert(addr);
+    }
+
+    pub fn remove_breakpoint(&mut self, addr: u16) {
+        self.breakpoints.remove(&addr);
+    }
+
+    pub fn breakpoints(&self) -> Vec<u16> {
+        self.breakpoints.iter().copied().collect()
+    }
+
+    pub fn breakpoint_hit(&self) -> bool {
+        self.breakpoint_hit
     }
 }

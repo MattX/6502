@@ -45,6 +45,7 @@ function EmulatorUI({ emu }: { emu: Emulator }) {
   const [lcdPixels, setLcdPixels] = useState<Uint8Array | null>(null);
   const [uploadedFiles, setUploadedFiles] = useState<string[]>([]);
   const [packets, setPackets] = useState<Packet[]>([]);
+  const [breakpoints, setBreakpoints] = useState<Set<number>>(new Set());
 
   const refresh = useCallback(() => {
     setLcdPixels(emu.lcd_pixels(Date.now()));
@@ -89,6 +90,12 @@ function EmulatorUI({ emu }: { emu: Emulator }) {
           const used = emu.run_for_cycles(remaining);
           remaining -= used;
           if (used === 0) break; // CPU halted
+          if (emu.breakpoint_hit()) {
+            refresh();
+            setRunning(false);
+            setCyclesPerSec(null);
+            return;
+          }
           if (remaining > 0) {
             // Broke out early (terminal write) — refresh mid-frame
             refresh();
@@ -193,37 +200,46 @@ function EmulatorUI({ emu }: { emu: Emulator }) {
         )}
       </div>
       <div className="main-layout">
-        <CpuWidget
-          pc={pc} sp={sp}
-          a={emu.a()} x={emu.x()} y={emu.y()}
-          status={emu.status()}
-          disasm={disasm}
-        />
-        <LcdWidget emu={emu} pixels={lcdPixels} />
-        <TerminalWidget
-          text={emu.terminal_text()}
-          terminalRef={terminalRef}
-          onKey={(data) => emu.send_keyboard_input(data)}
-        />
-        <PacketInspector packets={packets} onClear={() => setPackets([])} />
-        <div className="memory-panels">
-          <PageBrowser emu={emu} sp={sp} />
-          <StackDisplay emu={emu} sp={sp} />
+        <div className="col-left">
+          <TerminalWidget
+            text={emu.terminal_text()}
+            terminalRef={terminalRef}
+            onKey={(data) => emu.send_keyboard_input(data)}
+          />
+          <LcdWidget emu={emu} pixels={lcdPixels} />
         </div>
+        <div className="col-mid">
+          <CpuWidget
+            pc={pc} sp={sp}
+            a={emu.a()} x={emu.x()} y={emu.y()}
+            status={emu.status()}
+          />
+          <BridgeStatusWidget emu={emu} />
+          <BreakpointWidget
+            emu={emu}
+            breakpoints={breakpoints}
+            setBreakpoints={setBreakpoints}
+          />
+        </div>
+        <div className="col-right">
+          <DisassemblyWidget disasm={disasm} breakpoints={breakpoints} />
+          <PacketInspector packets={packets} onClear={() => setPackets([])} />
+        </div>
+      </div>
+      <div className="memory-panels">
+        <PageBrowser emu={emu} sp={sp} />
+        <StackDisplay emu={emu} sp={sp} />
       </div>
     </div>
   );
 }
 
-function CpuWidget({ pc, sp, a, x, y, status, disasm }: {
-  pc: number; sp: number; a: number; x: number; y: number;
-  status: number; disasm: string;
-}) {
-  const lines = disasm.split("\n");
-  const marked = lines
-    .map((line, i) => (i === 0 ? "> " + line : "  " + line))
-    .join("\n");
+const STATUS_FLAGS = ["N", "V", "-", "B", "D", "I", "Z", "C"] as const;
 
+function CpuWidget({ pc, sp, a, x, y, status }: {
+  pc: number; sp: number; a: number; x: number; y: number;
+  status: number;
+}) {
   return (
     <div className="cpu-widget">
       <h2>CPU</h2>
@@ -237,8 +253,111 @@ function CpuWidget({ pc, sp, a, x, y, status, disasm }: {
           <tr><th>P</th><td>${hex8(status)}</td></tr>
         </tbody>
       </table>
-      <h3>Disassembly</h3>
+      <div className="status-flags">
+        {STATUS_FLAGS.map((flag, i) => (
+          <span key={i} className={status & (0x80 >> i) ? "flag-set" : "flag-unset"}>
+            {flag}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DisassemblyWidget({ disasm, breakpoints }: {
+  disasm: string; breakpoints: Set<number>;
+}) {
+  const lines = disasm.split("\n");
+  const marked = lines.map((line, i) => {
+    const addr = parseInt(line.trimStart().slice(0, 4), 16);
+    const bpMark = breakpoints.has(addr) ? "\u25CF " : "  ";
+    const pcMark = i === 0 ? "> " : "  ";
+    return bpMark + pcMark + line;
+  }).join("\n");
+
+  return (
+    <div className="disassembly-widget">
+      <h2>Disassembly</h2>
       <pre className="disassembly">{marked}</pre>
+    </div>
+  );
+}
+
+function BreakpointWidget({ emu, breakpoints, setBreakpoints }: {
+  emu: Emulator;
+  breakpoints: Set<number>;
+  setBreakpoints: React.Dispatch<React.SetStateAction<Set<number>>>;
+}) {
+  const [inputVal, setInputVal] = useState("");
+
+  function handleAdd() {
+    const addr = parseInt(inputVal, 16);
+    if (!isNaN(addr) && addr >= 0 && addr <= 0xFFFF) {
+      emu.add_breakpoint(addr);
+      setBreakpoints((prev) => new Set(prev).add(addr));
+      setInputVal("");
+    }
+  }
+
+  function handleRemove(addr: number) {
+    emu.remove_breakpoint(addr);
+    setBreakpoints((prev) => {
+      const next = new Set(prev);
+      next.delete(addr);
+      return next;
+    });
+  }
+
+  const sorted = [...breakpoints].sort((a, b) => a - b);
+
+  return (
+    <div className="breakpoint-widget">
+      <h2>Breakpoints</h2>
+      <div className="bp-add">
+        <span>$</span>
+        <input
+          className="bp-input"
+          value={inputVal}
+          onChange={(e) => setInputVal(e.target.value.toUpperCase().replace(/[^0-9A-F]/g, "").slice(0, 4))}
+          onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+          placeholder="addr"
+          spellCheck={false}
+        />
+        <button onClick={handleAdd}>Add</button>
+      </div>
+      {sorted.length === 0 && <div className="bp-empty">No breakpoints set</div>}
+      <div className="bp-list">
+        {sorted.map((addr) => (
+          <div key={addr} className="bp-row">
+            <span className="bp-addr">${hex16(addr)}</span>
+            <button className="bp-remove" onClick={() => handleRemove(addr)}>&times;</button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BridgeStatusWidget({ emu }: { emu: Emulator }) {
+  const raw = emu.bridge_status();
+  let info: { state: string; keyboard: number; echo: number; netboot: string };
+  try {
+    info = JSON.parse(raw);
+  } catch {
+    return <div className="bridge-status-widget"><h2>Bridge</h2><pre>{raw}</pre></div>;
+  }
+
+  return (
+    <div className="bridge-status-widget">
+      <h2>Bridge</h2>
+      <table className="registers">
+        <tbody>
+          <tr><th>State</th><td>{info.state}</td></tr>
+          <tr><th>Keyboard</th><td>{info.keyboard}</td></tr>
+          <tr><th>Echo</th><td>{info.echo}</td></tr>
+          <tr><th>Netboot</th><td>{info.netboot}</td></tr>
+        </tbody>
+      </table>
     </div>
   );
 }

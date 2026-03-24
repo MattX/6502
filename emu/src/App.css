@@ -37,16 +37,26 @@ button {
   opacity: 0.8;
 }
 
-/* Top-level layout: CPU widget left, memory panels right */
+/* Top-level layout: Terminal | CPU+Bridge+BP | Disassembly */
 .main-layout {
   display: flex;
-  gap: 2rem;
+  gap: 1.5rem;
   align-items: flex-start;
-  flex-wrap: wrap;
 }
 
-.cpu-widget h2,
-.cpu-widget h3 {
+.col-left,
+.col-mid,
+.col-right {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.cpu-widget h2 {
+  margin: 0.5rem 0 0.25rem;
+}
+
+.disassembly-widget h2 {
   margin: 0.5rem 0 0.25rem;
 }
 
@@ -56,6 +66,7 @@ button {
   gap: 1.5rem;
   align-items: flex-start;
   flex-wrap: wrap;
+  margin-top: 1rem;
 }
 
 .memory-panels h3 {
@@ -234,6 +245,90 @@ td {
   font-size: 0.72rem;
 }
 
+/* Status flags */
+.status-flags {
+  display: flex;
+  gap: 0.3rem;
+  margin: 0.4rem 0;
+  font-family: monospace;
+  font-size: 0.85rem;
+}
+
+.flag-set {
+  font-weight: bold;
+  padding: 0.1rem 0.3rem;
+  border-radius: 2px;
+  background: #227722;
+  color: #bbffbb;
+}
+
+.flag-unset {
+  padding: 0.1rem 0.3rem;
+  opacity: 0.35;
+}
+
+/* Breakpoint widget */
+.breakpoint-widget {
+  min-width: 14ch;
+}
+
+.breakpoint-widget h2 {
+  margin: 0.5rem 0 0.25rem;
+}
+
+.bp-add {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-family: monospace;
+}
+
+.bp-input {
+  font-family: monospace;
+  font-size: inherit;
+  width: 5ch;
+  border: 1px solid #888;
+  background: inherit;
+  color: inherit;
+  padding: 0.15rem 0.25rem;
+}
+
+.bp-empty {
+  opacity: 0.5;
+  font-size: 0.8rem;
+  margin-top: 0.3rem;
+}
+
+.bp-list {
+  margin-top: 0.25rem;
+}
+
+.bp-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: monospace;
+  font-size: 0.85rem;
+  padding: 0.1rem 0;
+}
+
+.bp-remove {
+  padding: 0 0.3rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  line-height: 1;
+}
+
+/* Bridge status widget */
+.bridge-status-widget h2 {
+  margin: 0.5rem 0 0.25rem;
+}
+
+.bridge-status-widget td:last-child {
+  min-width: 18ch;
+  font-family: monospace;
+}
+
 /* Dark mode */
 @media (prefers-color-scheme: dark) {
   body {
@@ -271,6 +366,11 @@ td {
     background-color: #0d0d0d;
     border-color: #555;
   }
+
+  .flag-set {
+    background: #115511;
+    color: #88ff88;
+  }
 }
 
 /* Light mode */
@@ -296,5 +396,10 @@ td {
 
   .packet-list {
     background-color: #fafafa;
+  }
+
+  .flag-set {
+    background: #22aa22;
+    color: #ffffff;
   }
 }
