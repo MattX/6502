@@ -4,7 +4,7 @@ use crate::via::Via6522;
 use mos6502::memory::Bus;
 
 const RAM_SIZE: usize = 0xA000;
-const ROM_SIZE: usize = 0x1F00;
+pub(crate) const ROM_SIZE: usize = 0x1F00;
 const ROM_START: u16 = 0xE100;
 
 const TERM_COLS: usize = 40;
@@ -99,7 +99,7 @@ pub struct PacketEntry {
 /// Fixed-size buffer for bridge I/O — zero heap allocation on the hot path.
 const BRIDGE_BUF_CAP: usize = 256;
 
-struct BridgeBuf {
+pub(crate) struct BridgeBuf {
     data: [u8; BRIDGE_BUF_CAP],
     len: u8,
 }
@@ -112,7 +112,7 @@ impl BridgeBuf {
         }
     }
 
-    fn push(&mut self, byte: u8) {
+    pub(crate) fn push(&mut self, byte: u8) {
         if (self.len as usize) < BRIDGE_BUF_CAP {
             self.data[self.len as usize] = byte;
             self.len += 1;
@@ -140,71 +140,43 @@ enum PortState {
     },
 }
 
-struct NetbootState {
-    data: Vec<u8>, // 2-byte BE length prefix + file contents
-    offset: usize,
+// ---------------------------------------------------------------------------
+// DeviceHandler trait — the seam between real devices and mocks
+// ---------------------------------------------------------------------------
+
+pub(crate) trait DeviceHandler {
+    fn dispatch_write(&mut self, device: u8, data: &[u8]);
+    fn prepare_read(&mut self, device: u8, buf: &mut BridgeBuf);
+    fn clear(&mut self);
 }
 
-pub struct BridgePort {
+// ---------------------------------------------------------------------------
+// TlvBridge<H> — TLV state machine shared by all handlers
+// ---------------------------------------------------------------------------
+
+pub struct TlvBridge<H: DeviceHandler> {
     state: PortState,
-    pub terminal: TextGrid,
-    pub keyboard_in: VecDeque<u8>,
-    pub echo: VecDeque<u8>,
-    pub reset_requested: bool,
-    pub terminal_dirty: bool,
-    pub uploaded_files: HashMap<String, Vec<u8>>,
-    netboot: Option<NetbootState>,
-    packet_log: Vec<PacketEntry>,
+    pub handler: H,
+    pub(crate) packet_log: Vec<PacketEntry>,
 }
 
-impl BridgePort {
-    fn new() -> Self {
+impl<H: DeviceHandler> TlvBridge<H> {
+    pub(crate) fn new(handler: H) -> Self {
         Self {
             state: PortState::Idle,
-            terminal: TextGrid::new(),
-            keyboard_in: VecDeque::new(),
-            echo: VecDeque::new(),
-            reset_requested: false,
-            terminal_dirty: false,
-            uploaded_files: HashMap::new(),
-            netboot: None,
+            handler,
             packet_log: Vec::new(),
         }
     }
 
     pub fn clear(&mut self) {
         self.state = PortState::Idle;
-        self.terminal.clear();
-        self.keyboard_in.clear();
-        self.reset_requested = false;
-        self.terminal_dirty = false;
-        self.netboot = None;
+        self.handler.clear();
         self.packet_log.clear();
     }
 
     pub fn drain_packets(&mut self) -> Vec<PacketEntry> {
         std::mem::take(&mut self.packet_log)
-    }
-
-    pub fn status_summary(&self) -> String {
-        let state = match &self.state {
-            PortState::Idle => "Idle".to_string(),
-            PortState::WriteLen { device } => format!("WriteLen(dev={})", device),
-            PortState::WriteData { device, remaining, .. } => {
-                format!("WriteData(dev={}, rem={})", device, remaining)
-            }
-            PortState::ReadData { buf, pos } => {
-                format!("ReadData({}/{})", pos, buf.len)
-            }
-        };
-        let nb = match &self.netboot {
-            Some(nb) => format!("{}/{}", nb.offset, nb.data.len()),
-            None => "none".to_string(),
-        };
-        format!(
-            "{{\"state\":\"{}\",\"keyboard\":{},\"echo\":{},\"netboot\":\"{}\"}}",
-            state, self.keyboard_in.len(), self.echo.len(), nb
-        )
     }
 
     fn write_byte(&mut self, value: u8) {
@@ -218,7 +190,7 @@ impl BridgePort {
             }
             PortState::WriteLen { device } => {
                 if value == 0 {
-                    self.dispatch_write(device, &[]);
+                    self.do_write(device, &[]);
                     PortState::Idle
                 } else {
                     PortState::WriteData {
@@ -235,7 +207,7 @@ impl BridgePort {
             } => {
                 buf.push(value);
                 if remaining == 1 {
-                    self.dispatch_write(device, buf.as_slice());
+                    self.do_write(device, buf.as_slice());
                     PortState::Idle
                 } else {
                     PortState::WriteData {
@@ -277,60 +249,7 @@ impl BridgePort {
 
     fn start_read(&mut self, device: u8) -> PortState {
         let mut buf = BridgeBuf::new();
-        match device {
-            0 => {
-                let mut status: u8 = 0;
-                if !self.keyboard_in.is_empty() {
-                    status |= 1 << 2;
-                }
-                buf.push(2);
-                buf.push(status);
-                buf.push(1);
-                println!(
-                    "Bridge: Status read, keyboard_in len = {}",
-                    self.keyboard_in.len()
-                );
-            }
-            2 => {
-                let available = self.keyboard_in.len().min(254);
-                buf.push(available as u8);
-                if available > 0 {
-                    for _ in 0..available {
-                        if let Some(b) = self.keyboard_in.pop_front() {
-                            buf.push(b);
-                        }
-                    }
-                }
-            }
-            3 => {
-                if let Some(ref mut nb) = self.netboot {
-                    let remaining = nb.data.len() - nb.offset;
-                    let chunk = remaining.min(254);
-                    buf.push(chunk as u8);
-                    for i in 0..chunk {
-                        buf.push(nb.data[nb.offset + i]);
-                    }
-                    nb.offset += chunk;
-                    if nb.offset >= nb.data.len() {
-                        self.netboot = None;
-                    }
-                } else {
-                    buf.push(0);
-                }
-            }
-            7 => {
-                let echo_available = self.echo.len().min(254);
-                buf.push(echo_available as u8);
-                for _ in 0..echo_available {
-                    if let Some(b) = self.echo.pop_front() {
-                        buf.push(b);
-                    }
-                }
-            }
-            _ => {
-                buf.push(0);
-            }
-        }
+        self.handler.prepare_read(device, &mut buf);
         // Log the read response (skip the length byte at position 0)
         let payload = if buf.len > 1 {
             buf.data[1..buf.len as usize].to_vec()
@@ -345,12 +264,51 @@ impl BridgePort {
         PortState::ReadData { buf, pos: 0 }
     }
 
-    fn dispatch_write(&mut self, device: u8, data: &[u8]) {
+    fn do_write(&mut self, device: u8, data: &[u8]) {
         self.packet_log.push(PacketEntry {
             direction: 0,
             device,
             data: data.to_vec(),
         });
+        self.handler.dispatch_write(device, data);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RealDevices — the production device handler (terminal, keyboard, etc.)
+// ---------------------------------------------------------------------------
+
+struct NetbootState {
+    data: Vec<u8>, // 2-byte BE length prefix + file contents
+    offset: usize,
+}
+
+pub struct RealDevices {
+    pub terminal: TextGrid,
+    pub keyboard_in: VecDeque<u8>,
+    pub echo: VecDeque<u8>,
+    pub reset_requested: bool,
+    pub terminal_dirty: bool,
+    pub uploaded_files: HashMap<String, Vec<u8>>,
+    netboot: Option<NetbootState>,
+}
+
+impl RealDevices {
+    pub fn new() -> Self {
+        Self {
+            terminal: TextGrid::new(),
+            keyboard_in: VecDeque::new(),
+            echo: VecDeque::new(),
+            reset_requested: false,
+            terminal_dirty: false,
+            uploaded_files: HashMap::new(),
+            netboot: None,
+        }
+    }
+}
+
+impl DeviceHandler for RealDevices {
+    fn dispatch_write(&mut self, device: u8, data: &[u8]) {
         match device {
             1 => {
                 self.reset_requested = true;
@@ -386,22 +344,108 @@ impl BridgePort {
             _ => {}
         }
     }
+
+    fn prepare_read(&mut self, device: u8, buf: &mut BridgeBuf) {
+        match device {
+            0 => {
+                let mut status: u8 = 0;
+                if !self.keyboard_in.is_empty() {
+                    status |= 1 << 2;
+                }
+                buf.push(2);
+                buf.push(status);
+                buf.push(1);
+            }
+            2 => {
+                let available = self.keyboard_in.len().min(254);
+                buf.push(available as u8);
+                for _ in 0..available {
+                    if let Some(b) = self.keyboard_in.pop_front() {
+                        buf.push(b);
+                    }
+                }
+            }
+            3 => {
+                if let Some(ref mut nb) = self.netboot {
+                    let remaining = nb.data.len() - nb.offset;
+                    let chunk = remaining.min(254);
+                    buf.push(chunk as u8);
+                    for i in 0..chunk {
+                        buf.push(nb.data[nb.offset + i]);
+                    }
+                    nb.offset += chunk;
+                    if nb.offset >= nb.data.len() {
+                        self.netboot = None;
+                    }
+                } else {
+                    buf.push(0);
+                }
+            }
+            7 => {
+                let echo_available = self.echo.len().min(254);
+                buf.push(echo_available as u8);
+                for _ in 0..echo_available {
+                    if let Some(b) = self.echo.pop_front() {
+                        buf.push(b);
+                    }
+                }
+            }
+            _ => {
+                buf.push(0);
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.terminal.clear();
+        self.keyboard_in.clear();
+        self.reset_requested = false;
+        self.terminal_dirty = false;
+        self.netboot = None;
+    }
 }
 
-pub struct MattbrewBus {
+impl TlvBridge<RealDevices> {
+    pub fn status_summary(&self) -> String {
+        let state = match &self.state {
+            PortState::Idle => "Idle".to_string(),
+            PortState::WriteLen { device } => format!("WriteLen(dev={})", device),
+            PortState::WriteData { device, remaining, .. } => {
+                format!("WriteData(dev={}, rem={})", device, remaining)
+            }
+            PortState::ReadData { buf, pos } => {
+                format!("ReadData({}/{})", pos, buf.len)
+            }
+        };
+        let nb = match &self.handler.netboot {
+            Some(nb) => format!("{}/{}", nb.offset, nb.data.len()),
+            None => "none".to_string(),
+        };
+        format!(
+            "{{\"state\":\"{}\",\"keyboard\":{},\"echo\":{},\"netboot\":\"{}\"}}",
+            state, self.handler.keyboard_in.len(), self.handler.echo.len(), nb
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MattbrewBus<H> — memory-mapped bus, generic over device handler
+// ---------------------------------------------------------------------------
+
+pub struct MattbrewBus<H: DeviceHandler> {
     ram: [u8; RAM_SIZE],
     rom: [u8; ROM_SIZE],
     pub via: Via6522,
-    pub bridge: BridgePort,
+    pub bridge: TlvBridge<H>,
 }
 
-impl MattbrewBus {
-    pub fn new() -> Self {
+impl<H: DeviceHandler> MattbrewBus<H> {
+    pub fn new(handler: H) -> Self {
         Self {
             ram: [0; RAM_SIZE],
             rom: [0xFF; ROM_SIZE],
             via: Via6522::new(),
-            bridge: BridgePort::new(),
+            bridge: TlvBridge::new(handler),
         }
     }
 
@@ -427,7 +471,7 @@ impl MattbrewBus {
     }
 }
 
-impl Bus for MattbrewBus {
+impl<H: DeviceHandler> Bus for MattbrewBus<H> {
     fn get_byte(&mut self, address: u16) -> u8 {
         match address {
             0x0000..=0x9FFF => self.ram[address as usize],

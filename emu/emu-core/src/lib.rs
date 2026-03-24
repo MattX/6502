@@ -2,16 +2,21 @@ mod bus;
 mod disassemble;
 mod via;
 
+#[cfg(test)]
+mod test_harness;
+#[cfg(test)]
+mod tests;
+
 use std::collections::HashSet;
 
-use bus::MattbrewBus;
+use bus::{MattbrewBus, RealDevices};
 use mos6502::cpu::CPU;
 use mos6502::instruction::Cmos6502;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub struct Emulator {
-    cpu: CPU<MattbrewBus, Cmos6502>,
+    cpu: CPU<MattbrewBus<RealDevices>, Cmos6502>,
     breakpoints: HashSet<u16>,
     breakpoint_hit: bool,
 }
@@ -21,7 +26,7 @@ impl Emulator {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Emulator {
         console_error_panic_hook::set_once();
-        let mut cpu = CPU::new(MattbrewBus::new(), Cmos6502);
+        let mut cpu = CPU::new(MattbrewBus::new(RealDevices::new()), Cmos6502);
         cpu.reset();
         Emulator { cpu, breakpoints: HashSet::new(), breakpoint_hit: false }
     }
@@ -43,7 +48,7 @@ impl Emulator {
     /// a terminal write occurs, or a breakpoint is hit.
     /// Returns the number of cycles actually consumed.
     pub fn run_for_cycles(&mut self, budget: u32) -> u32 {
-        self.cpu.memory.bridge.terminal_dirty = false;
+        self.cpu.memory.bridge.handler.terminal_dirty = false;
         self.breakpoint_hit = false;
         let start = self.cpu.cycles;
         let target = start + budget as u64;
@@ -51,7 +56,7 @@ impl Emulator {
             if !self.cpu.single_step() {
                 break;
             }
-            if self.cpu.memory.bridge.terminal_dirty {
+            if self.cpu.memory.bridge.handler.terminal_dirty {
                 break;
             }
             if !self.breakpoints.is_empty()
@@ -116,12 +121,12 @@ impl Emulator {
 
     /// Return the 40×25 terminal grid as a string.
     pub fn terminal_text(&self) -> String {
-        self.cpu.memory.bridge.terminal.as_string()
+        self.cpu.memory.bridge.handler.terminal.as_string()
     }
 
     /// Push keyboard input bytes for 6502 to read from device 2.
     pub fn send_keyboard_input(&mut self, data: &[u8]) {
-        self.cpu.memory.bridge.keyboard_in.extend(data);
+        self.cpu.memory.bridge.handler.keyboard_in.extend(data);
     }
 
     // --- Netboot (device 3) ---
@@ -131,6 +136,7 @@ impl Emulator {
         self.cpu
             .memory
             .bridge
+            .handler
             .uploaded_files
             .insert(name.to_string(), data.to_vec());
     }

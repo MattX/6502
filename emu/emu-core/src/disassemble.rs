@@ -3,7 +3,7 @@ use core::fmt::Write;
 use mos6502::Variant;
 use mos6502::instruction::{AddressingMode, Cmos6502, Instruction};
 
-use crate::bus::MattbrewBus;
+use crate::bus::{DeviceHandler, MattbrewBus};
 
 /// Format an instruction mnemonic. Strips trailing "nd" variants (ADCnd → ADC)
 /// and lowercases the debug output that mos6502 provides.
@@ -126,7 +126,7 @@ fn format_mnemonic(instr: Instruction) -> &'static str {
 }
 
 /// Format the operand based on addressing mode and operand bytes.
-fn format_operand(mode: AddressingMode, bus: &MattbrewBus, addr: u16) -> String {
+fn format_operand<H: DeviceHandler>(mode: AddressingMode, bus: &MattbrewBus<H>, addr: u16) -> String {
     let b1 = || bus.peek(addr.wrapping_add(1));
     let w = || {
         let lo = bus.peek(addr.wrapping_add(1)) as u16;
@@ -167,7 +167,7 @@ fn format_operand(mode: AddressingMode, bus: &MattbrewBus, addr: u16) -> String 
 
 /// Disassemble `lines` instructions starting at `start_addr`.
 /// Returns a multi-line string with one instruction per line.
-pub fn disassemble(bus: &MattbrewBus, start_addr: u16, lines: u32) -> String {
+pub fn disassemble<H: DeviceHandler>(bus: &MattbrewBus<H>, start_addr: u16, lines: u32) -> String {
     let mut result = String::new();
     let mut addr = start_addr;
 
