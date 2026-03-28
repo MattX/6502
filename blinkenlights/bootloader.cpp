@@ -429,6 +429,340 @@ void cmd_ed(const char* args) {
     }
 }
 
+// --- asm: minimal 6502 assembler (SAN notation, hex operands only) ---
+
+enum AsmMode : uint8_t {
+    M_IMP = 0, M_A, M_IMM, M_D, M_DX, M_DY, M_DXI, M_DIY, M_X, M_Y, M_I
+};
+
+// Operand byte count per mode (M_IMP=2 for absolute, overridden to 0 for implied)
+static const uint8_t mode_opsize[] = { 2, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2 };
+
+// Pack 3 lowercase ASCII chars into a uint16_t for fast comparison
+static uint16_t pack3(const char* s) {
+    return ((uint16_t)(s[0] - 'a') << 10) | ((uint16_t)(s[1] - 'a') << 5) | (s[2] - 'a');
+}
+
+// Parse SAN dot-suffix, return mode. *p points after mnemonic on entry,
+// advanced past suffix on return.
+static AsmMode parse_suffix(const char** p) {
+    if (**p != '.') return M_IMP;
+    (*p)++;
+    char c = **p;
+    if (c == '#') { (*p)++; return M_IMM; }
+    if (c == 'a') { (*p)++; return M_A; }
+    if (c == 'i') { (*p)++; return M_I; }
+    if (c == 'x') { (*p)++; return M_X; }
+    if (c == 'y') { (*p)++; return M_Y; }
+    if (c == 'd') {
+        (*p)++;
+        c = **p;
+        if (c == 'x') {
+            (*p)++;
+            if (**p == 'i') { (*p)++; return M_DXI; }
+            return M_DX;
+        }
+        if (c == 'i') {
+            (*p)++;
+            if (**p == 'y') { (*p)++; return M_DIY; }
+            return M_I;  // .di not valid, treat as error later
+        }
+        if (c == 'y') { (*p)++; return M_DY; }
+        return M_D;
+    }
+    return M_IMP;  // unknown suffix
+}
+
+// Group A (cc=01): ora and eor adc sta lda cmp sbc
+static const uint16_t grp_a[] = {
+    0x3A20, 0x01A3, 0x11D1, 0x0062, 0x4A60, 0x2C60, 0x098F, 0x4822
+};
+// Mode -> bbb for cc=01
+// M_IMP->3(abs), M_IMM->2, M_D->1, M_DX->5, M_DXI->0, M_DIY->4, M_X->7, M_Y->6
+static const uint8_t cc01_bbb[] = { 3, 0xFF, 2, 1, 5, 0xFF, 0, 4, 7, 6, 0xFF };
+
+// Group B (cc=10): asl rol lsr ror stx ldx dec inc
+static const uint16_t grp_b[] = {
+    0x024B, 0x45CB, 0x2E51, 0x45D1, 0x4A77, 0x2C77, 0x0C82, 0x21A2
+};
+// Mode -> bbb for cc=10
+// M_IMP->3(abs), M_A->2, M_IMM->0, M_D->1, M_DX->5, M_DY->5, M_X->7, M_Y->7
+static const uint8_t cc10_bbb[] = { 3, 2, 0, 1, 5, 5, 0xFF, 0xFF, 7, 7, 0xFF };
+
+// Group C (cc=00): bit sty ldy cpy cpx
+static const uint16_t grp_c[] = {
+    0x0513, 0x4A78, 0x2C78, 0x09F8, 0x09F7
+};
+static const uint8_t grp_c_aaa[] = { 1, 4, 5, 6, 7 };
+// Mode -> bbb for cc=00
+static const uint8_t cc00_bbb[] = { 3, 0xFF, 0, 1, 5, 0xFF, 0xFF, 0xFF, 7, 0xFF, 0xFF };
+
+// Branches: bpl bmi bvc bvs bcc bcs bne beq
+static const uint16_t grp_br[] = {
+    0x05EB, 0x0588, 0x06A2, 0x06B2, 0x0442, 0x0452, 0x05A4, 0x0490
+};
+
+// Implied instructions: packed mnemonic + opcode
+static const uint16_t imp_mn[] = {
+    0x062A, // brk
+    0x3CEF, // php
+    0x3D6F, // plp
+    0x3CE0, // pha
+    0x3D60, // pla
+    0x4668, // rti
+    0x4672, // rts
+    0x0962, // clc
+    0x4882, // sec
+    0x0968, // cli
+    0x4888, // sei
+    0x0975, // clv
+    0x0963, // cld
+    0x4883, // sed
+    0x0C98, // dey
+    0x4F00, // tya
+    0x4C18, // tay
+    0x21B8, // iny
+    0x0C97, // dex
+    0x4EE0, // txa
+    0x4C17, // tax
+    0x21B7, // inx
+    0x35CF, // nop
+    0x4EF2, // txs
+    0x4E57, // tsx
+};
+static const uint8_t imp_op[] = {
+    0x00, 0x08, 0x28, 0x48, 0x68, 0x40, 0x60,
+    0x18, 0x38, 0x58, 0x78, 0xB8, 0xD8, 0xF8,
+    0x88, 0x98, 0xA8, 0xC8, 0xCA, 0x8A, 0xAA, 0xE8, 0xEA, 0x9A, 0xBA
+};
+
+void cmd_asm(const char* args) {
+    // Parse: <text_addr> <code_addr>
+    const char* p = args;
+    while (*p != ' ' && *p != 0) p++;
+    if (*p == 0) {
+        term_putstr("Usage: asm <text> <code>\n");
+        return;
+    }
+
+    char tmp[5];
+    uint8_t len = (uint8_t)(p - args);
+    if (len > 4) { term_putstr("?\n"); return; }
+    for (uint8_t i = 0; i < len; i++) tmp[i] = args[i];
+    tmp[len] = 0;
+
+    uint16_t text_addr, code_addr;
+    if (!parse_hex(tmp, &text_addr)) { term_putstr("?\n"); return; }
+    p++;
+    if (!parse_hex(p, &code_addr)) { term_putstr("?\n"); return; }
+
+    char* src = (char*)text_addr;
+    uint8_t* dest = (uint8_t*)code_addr;
+    uint16_t line_num = 0;
+
+    while (*src != 0) {
+        line_num++;
+        // Find end of line
+        const char* eol = src;
+        while (*eol != '\n' && *eol != 0) eol++;
+
+        // Skip blank lines
+        if (eol == src) {
+            src = (char*)eol + (*eol == '\n' ? 1 : 0);
+            continue;
+        }
+
+        // Declare all variables before any goto
+        uint16_t mn;
+        const char* cp;
+        AsmMode mode;
+        uint16_t operand = 0;
+        bool has_operand = false;
+        uint8_t opcode = 0;
+        uint8_t op_bytes = 0;
+        bool found = false;
+        char hex_buf[5];
+        uint8_t hi;
+
+        // Parse mnemonic (3 chars)
+        if (eol - src < 3) goto err;
+        mn = pack3(src);
+        cp = src + 3;
+
+        // Parse suffix
+        mode = parse_suffix(&cp);
+
+        // Skip space, parse optional hex operand
+        if (*cp == ' ') {
+            cp++;
+            hi = 0;
+            while (cp < eol && hi < 4) {
+                hex_buf[hi++] = *cp++;
+            }
+            hex_buf[hi] = 0;
+            if (hi > 0) {
+                if (!parse_hex(hex_buf, &operand)) goto err;
+                has_operand = true;
+            }
+        }
+        if (mode == M_IMP && !has_operand) {
+            for (uint8_t i = 0; i < 25; i++) {
+                if (imp_mn[i] == mn) {
+                    opcode = imp_op[i];
+                    op_bytes = 0;
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        // Try Group A (cc=01)
+        if (!found) {
+            for (uint8_t i = 0; i < 8; i++) {
+                if (grp_a[i] == mn) {
+                    uint8_t bbb = cc01_bbb[mode];
+                    if (bbb == 0xFF) goto err;
+                    // STA immediate is invalid
+                    if (i == 4 && mode == M_IMM) goto err;
+                    opcode = (i << 5) | (bbb << 2) | 0x01;
+                    op_bytes = mode_opsize[mode];
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        // Try Group B (cc=10)
+        if (!found) {
+            for (uint8_t i = 0; i < 8; i++) {
+                if (grp_b[i] == mn) {
+                    // STX/LDX: accept .dy/.y, reject .dx/.x
+                    if (i == 4 || i == 5) {
+                        if (mode == M_DX || mode == M_X) goto err;
+                    } else {
+                        if (mode == M_DY || mode == M_Y) goto err;
+                    }
+                    // Only LDX gets immediate
+                    if (mode == M_IMM && i != 5) goto err;
+                    // DEC/INC: no accumulator
+                    if (mode == M_A && (i == 6 || i == 7)) goto err;
+                    // STX: no accumulator or immediate
+                    if (i == 4 && (mode == M_A || mode == M_IMM)) goto err;
+                    uint8_t bbb = cc10_bbb[mode];
+                    if (bbb == 0xFF) goto err;
+                    opcode = (i << 5) | (bbb << 2) | 0x02;
+                    op_bytes = mode_opsize[mode];
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        // Try Group C (cc=00)
+        if (!found) {
+            for (uint8_t i = 0; i < 5; i++) {
+                if (grp_c[i] == mn) {
+                    uint8_t bbb = cc00_bbb[mode];
+                    if (bbb == 0xFF) goto err;
+                    // BIT: only .d and abs
+                    if (i == 0 && mode != M_D && mode != M_IMP) goto err;
+                    // STY: no immediate
+                    if (i == 1 && mode == M_IMM) goto err;
+                    opcode = (grp_c_aaa[i] << 5) | (bbb << 2) | 0x00;
+                    op_bytes = mode_opsize[mode];
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        // Try branches
+        if (!found) {
+            for (uint8_t i = 0; i < 8; i++) {
+                if (grp_br[i] == mn) {
+                    if (!has_operand) goto err;
+                    opcode = i * 0x20 + 0x10;
+                    // Compute relative offset: target - (pc + 2)
+                    {
+                        uint16_t pc = (uint16_t)(uintptr_t)dest;
+                        int16_t offset = (int16_t)(operand - (pc + 2));
+                        if (offset < -128 || offset > 127) {
+                            term_putstr("range\n");
+                            goto err_noprint;
+                        }
+                        *dest++ = opcode;
+                        *dest++ = (uint8_t)(offset & 0xFF);
+                        term_puthex16(pc);
+                        term_putstr(": ");
+                        term_puthex(opcode);
+                        term_putchar(' ');
+                        term_puthex((uint8_t)(offset & 0xFF));
+                        term_putchar('\n');
+                    }
+                    found = true;
+                    goto next_line;
+                }
+            }
+        }
+
+        // Try JMP/JSR
+        if (!found) {
+            if (mn == pack3("jmp")) {
+                if (mode == M_I) {
+                    opcode = 0x6C;
+                } else if (mode == M_IMP) {
+                    opcode = 0x4C;
+                } else {
+                    goto err;
+                }
+                op_bytes = 2;
+                found = true;
+            } else if (mn == pack3("jsr") && mode == M_IMP) {
+                opcode = 0x20;
+                op_bytes = 2;
+                found = true;
+            }
+        }
+
+        if (!found) goto err;
+
+        {
+            // Emit opcode + operand
+            uint16_t pc = (uint16_t)(uintptr_t)dest;
+            *dest++ = opcode;
+            term_puthex16(pc);
+            term_putstr(": ");
+            term_puthex(opcode);
+            if (op_bytes >= 1) {
+                *dest++ = operand & 0xFF;
+                term_putchar(' ');
+                term_puthex(operand & 0xFF);
+            }
+            if (op_bytes >= 2) {
+                *dest++ = (operand >> 8) & 0xFF;
+                term_putchar(' ');
+                term_puthex((operand >> 8) & 0xFF);
+            }
+            term_putchar('\n');
+        }
+        goto next_line;
+
+    err:
+        term_putstr("? line ");
+        term_putdec(line_num);
+        term_putchar('\n');
+    err_noprint:
+        return;
+
+    next_line:
+        src = (char*)eol + (*eol == '\n' ? 1 : 0);
+    }
+
+    uint16_t total = (uint16_t)(uintptr_t)dest - code_addr;
+    term_putdec(total);
+    term_putstr(" bytes\n");
+}
+
 bool starts_with(const char* str, const char* prefix) {
     while (*prefix != 0) {
         if (*str != *prefix) {
@@ -468,6 +802,8 @@ int main() {
             cmd_load((char*)recv_buf + 5);
         } else if (starts_with((char*)recv_buf, "ed ")) {
             cmd_ed((char*)recv_buf + 3);
+        } else if (starts_with((char*)recv_buf, "asm ")) {
+            cmd_asm((char*)recv_buf + 4);
         } else if (starts_with((char*)recv_buf, "peek ")) {
             uint16_t address;
             bool ok = parse_hex((char*)recv_buf + 5, &address);

@@ -1,5 +1,5 @@
 CLANG = $(HOME)/bin/llvm-mos/bin/mos-mattbrew-clang++
-CFLAGS = -Os -flto
+CFLAGS = -Os -flto -g
 
 bootloader.bin: bootloader.cpp
 	$(CLANG) $(CFLAGS) $< -o $@
