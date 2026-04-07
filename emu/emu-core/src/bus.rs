@@ -461,6 +461,8 @@ impl<H: DeviceHandler> MattbrewBus<H> {
     }
 
     pub fn load_rom(&mut self, data: &[u8]) {
+        // Drop the first page, which is masked off by the IO page.
+        let data = &data[256..];
         self.rom.fill(0xFF);
         let len = data.len().min(ROM_SIZE);
         self.rom[..len].copy_from_slice(&data[..len]);

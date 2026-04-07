@@ -329,16 +329,17 @@ fn main() -> Result<()> {
     let irq = IrqWatcher::new()?;
     let mut master = SpiMaster::new()?;
 
-    // Wait for Pico
-    print!("Waiting for IRQ... ");
-    if !irq.is_asserted()? {
-        if !irq.wait_edge(Duration::from_secs(10))? {
-            println!("TIMEOUT");
-            return Ok(());
-        }
-        irq.consume_edge()?;
-    }
-    println!("OK");
+    // Probably not needed, Pico will realistically be up before Zero.
+
+    // print!("Waiting for IRQ... ");
+    // if !irq.is_asserted()? {
+    //     if !irq.wait_edge(Duration::from_secs(10))? {
+    //         println!("TIMEOUT");
+    //         return Ok(());
+    //     }
+    //     irq.consume_edge()?;
+    // }
+    // println!("OK");
 
     // Initial sync
     if master.request_and_read(Duration::from_secs(2))?.is_none() {

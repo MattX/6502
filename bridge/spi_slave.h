@@ -40,8 +40,8 @@
 #define SPI_SLAVE_PIN_CSN   17      // CS (input from Zero)
 #define SPI_SLAVE_PIN_SCK   18      // Clock (input from Zero)
 #define SPI_SLAVE_PIN_TX    19      // MISO (output to Zero)
-#define SPI_SLAVE_PIN_IRQ   20      // IRQ (output to Zero, active low)
-#define SPI_SLAVE_PIN_READY 21      // READY (output to Zero, active low)
+#define SPI_SLAVE_PIN_READY 20      // READY (output to Zero, active low)
+#define SPI_SLAVE_PIN_IRQ   21      // IRQ (output to Zero, active low)
 
 // --- RX ring buffer (DMA) ---
 

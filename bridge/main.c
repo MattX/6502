@@ -283,6 +283,13 @@ int main(void) {
             // Not reached — watchdog reboots
         }
 
+        // Poll USB serial for 'R' → reboot (debug aid)
+        int ch = getchar_timeout_us(0);
+        if (ch == 'R') {
+            printf("Reboot requested via USB\n");
+            reset_requested = true;
+        }
+
         bus_task();
         spi_slave_task();
         // Disabled - 6502 doesn't have a good IRQ handler yet.

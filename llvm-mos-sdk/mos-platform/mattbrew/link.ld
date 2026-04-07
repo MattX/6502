@@ -8,6 +8,7 @@ ASSERT(__rc31 == 0xff, "Inconsistent zero page map.")
 MEMORY {
   zp : ORIGIN = 0x00, LENGTH = 0xe0
   ram : ORIGIN = 0x200, LENGTH = 0xa000 - 0x200
+  rom_header : ORIGIN = 0xe000, LENGTH = 0x100
   rom : ORIGIN = 0xe100, LENGTH = 0xfffa - 0xe100
 }
 
@@ -18,12 +19,20 @@ PROVIDE(nmi = _irq_default);
 REGION_ALIAS("c_readonly", rom)
 REGION_ALIAS("c_writeable", ram)
 
-SECTIONS { INCLUDE c.ld }
+SECTIONS {
+  .rom_header (NOLOAD) : {
+    FILL(0x00)
+    . = . + 0x100;
+  } > rom_header
+
+  INCLUDE c.ld
+}
 
 /* Set initial soft stack address to just above last ram address. (It grows down.) */
 __stack = ORIGIN(ram) + LENGTH(ram);
 
 OUTPUT_FORMAT {
+  FULL(rom_header)
   FULL(rom)
   SHORT(nmi)
   SHORT(_start)
