@@ -2,58 +2,21 @@
 
 #include <mattbrew.h>
 
-uint16_t strlen(const char* str) {
-    uint16_t len = 0;
-    while (str[len] != 0) {
-        len++;
-    }
-    return len;
-}
-
-void lcd_putstr(const char* msg) {
-    while (*msg != 0) {
-        lcd_putchar(*msg);
-        msg++;
-    }
-}
-
-void lcd_reset() {
-    lcd_instruction(LCD_I_CLEAR);
-    lcd_instruction(LCD_I_HOME);
-}
-
-void term_putstr(const char* msg) {
-    uint16_t len = strlen(msg);
-    while (len > 0) {
-        uint8_t chunk_len = len > 255 ? 255 : len;
-        io_write(2, (const uint8_t*)msg, chunk_len);
-        msg += chunk_len;
-        len -= chunk_len;
-    }
-}
-
-void term_putchar(char c) {
-    io_write(2, (const uint8_t*)&c, 1);
-}
+// ===================
+// Utility functions
+// ===================
 
 char nibble_char(uint8_t val) {
     val &= 0x0F;
     return val < 10 ? '0' + val : 'A' + val - 10;
 }
 
-void lcd_puthex(uint8_t val) {
-    lcd_putchar(nibble_char(val >> 4));
-    lcd_putchar(nibble_char(val));
-}
-
-void term_puthex(uint8_t val) {
-    term_putchar(nibble_char(val >> 4));
-    term_putchar(nibble_char(val));
-}
-
-void term_puthex16(uint16_t val) {
-    term_puthex((val >> 8) & 0xFF);
-    term_puthex(val & 0xFF);
+uint16_t strlen(const char* str) {
+    uint16_t len = 0;
+    while (str[len] != 0) {
+        len++;
+    }
+    return len;
 }
 
 bool parse_hex(const char* str, uint16_t* out) {
@@ -80,9 +43,69 @@ bool parse_hex(const char* str, uint16_t* out) {
     return true;
 }
 
-// line_buf must be 255 bytes or more.
+bool starts_with(const char* str, const char* prefix) {
+    while (*prefix != 0) {
+        if (*str != *prefix) {
+            return false;
+        }
+        str++;
+        prefix++;
+    }
+    return true;
+}
+
+// ===================
+// LCD
+// ===================
+
+void lcd_putstr(const char* msg) {
+    while (*msg != 0) {
+        lcd_putchar(*msg);
+        msg++;
+    }
+}
+
+void lcd_reset() {
+    lcd_instruction(LCD_I_CLEAR);
+    lcd_instruction(LCD_I_HOME);
+}
+
+void lcd_puthex(uint8_t val) {
+    lcd_putchar(nibble_char(val >> 4));
+    lcd_putchar(nibble_char(val));
+}
+
+// ===================
+// Terminal I/O
+// ===================
+
+void term_putstr(const char* msg) {
+    uint16_t len = strlen(msg);
+    while (len > 0) {
+        uint8_t chunk_len = len > 255 ? 255 : len;
+        io_write(2, (const uint8_t*)msg, chunk_len);
+        msg += chunk_len;
+        len -= chunk_len;
+    }
+}
+
+void term_putchar(char c) {
+    io_write(2, (const uint8_t*)&c, 1);
+}
+
+void term_puthex(uint8_t val) {
+    term_putchar(nibble_char(val >> 4));
+    term_putchar(nibble_char(val));
+}
+
+void term_puthex16(uint16_t val) {
+    term_puthex((val >> 8) & 0xFF);
+    term_puthex(val & 0xFF);
+}
+
+// line_buf must be 128 bytes or more.
 void term_getline(char* line_buf) {
-    static uint8_t recv_buf[255];
+    static uint8_t recv_buf[8];
     uint8_t total_len = 0;
     do {
         uint8_t len = io_read(2, recv_buf);
@@ -96,7 +119,7 @@ void term_getline(char* line_buf) {
                     total_len--;
                 }
             } else {
-                if (total_len < 255) {
+                if (total_len < 128) {
                     line_buf[total_len] = c;
                     total_len++;
                 }
@@ -109,10 +132,42 @@ void term_getline(char* line_buf) {
     line_buf[total_len - 1] = 0;
 }
 
-// Load a program from device 3 (netboot) into RAM at $0400 and jump to it.
+// Checks that |buf| has at least |minimum| bytes remaining starting from |*idx|. If not,
+// copies remaining data between |*idx| and |*len| to the start of |buf|, updates |*len| and |*idx| accordingly,
+// and pulls another chunk of data from device 3.
+bool check_len(uint8_t minimum, uint8_t* buf, uint8_t* idx, uint8_t* len) {
+    if (*idx + minimum < *len) {
+        return true;
+    }
+
+    // Move remaining data to start of buffer
+    uint8_t remaining = *len - *idx;
+    for (uint8_t i = 0; i < remaining; i++) {
+        buf[i] = buf[*idx + i];
+    }
+    *len = remaining;
+    *idx = 0;
+
+    *len += io_read(3, buf + remaining);
+    return *len >= minimum;
+}
+
+uint8_t blocking_read(uint8_t* buf) {
+    uint8_t len;
+    do {
+        len = io_read(3, buf);
+    } while (len == 0);
+    return len;
+}
+
+// The netboot device on 3 returns data in chunks of up to 128 bytes, plus we need
+// a little margin to store a previous header's worth of data.
+static uint8_t buf[128 + 6];
+
+// Load a program from device 3 (netboot) into RAM.
 // name must be <255 chars (guaranteed by term_getline's uint8_t length).
 void cmd_load(const char* name) {
-    uint16_t name_len = strlen(name);
+    uint8_t name_len = strlen(name);
     if (name_len == 0) {
         term_putstr("Usage: load <name>\n");
         return;
@@ -121,672 +176,92 @@ void cmd_load(const char* name) {
     // Send filename to device 3
     io_write(3, (const uint8_t*)name, (uint8_t)name_len);
 
-    // Read first chunk (spin until data available)
-    static uint8_t load_buf[255];
-    uint8_t len;
-    do {
-        len = io_read(3, load_buf);
-    } while (len == 0);
+    // Buffer holds 1 full chunk (128 bytes) plus 5 bytes for header parsing.
+    uint8_t len = blocking_read(buf);
+    uint8_t idx = 0;
 
-    if (len < 2) {
-        term_putstr("Error: bad response\n");
+    // For the header, we can get away with not using next_byte, since we know the 
+    // first chunk will contain the entire header.
+    if (len == 0) {
+        term_putstr("not found\n");
         return;
     }
 
-    uint16_t total = ((uint16_t)load_buf[0] << 8) | load_buf[1];
-    if (total == 0) {
-        term_putstr("File not found: ");
-        term_putstr(name);
+    if (len < 6) {
+        term_putstr("response too short\n");
+        return;
+    }
+    if (buf[idx] != 0x45 || buf[idx+1] != 0x69 || buf[idx+2] != 0x1) {
+        term_putstr("invalid binary magic\n");
+        return;
+    }
+    idx += 3;
+    uint16_t entrypoint = buf[idx++];
+    entrypoint |= buf[idx++] << 8;
+    uint8_t section_count = buf[idx++];
+    uint8_t current_section = 0;
+
+    while (current_section < section_count) {
+        check_len(5, buf, &idx, &len);
+        uint16_t section_addr = buf[idx++];
+        section_addr |= buf[idx++] << 8;
+        term_putstr("Loading section ");
+        term_puthex16(current_section);
+        term_putstr(" to 0x");
+        term_puthex16(section_addr);
         term_putstr("\n");
-        return;
-    }
-
-    term_putstr("Loading ");
-    term_puthex16(total);
-    term_putstr(" bytes...\n");
-
-    // Copy initial data (after 2-byte length header)
-    uint8_t* dest = (uint8_t*)0x0400;
-    uint16_t received = 0;
-    for (uint8_t i = 2; i < len; i++) {
-        *dest++ = load_buf[i];
-        received++;
-    }
-
-    // Read remaining chunks
-    while (received < total) {
-        len = io_read(3, load_buf);
-        if (len == 0) continue;
-        for (uint8_t i = 0; i < len; i++) {
-            *dest++ = load_buf[i];
-            received++;
-        }
-    }
-
-    term_putstr("OK, jumping to $0400\n");
-    ((void (*)(void))0x0400)();
-}
-
-// --- ed: minimal line editor ---
-// Buffer format: lines are \n-terminated, buffer ends with \0.
-
-uint16_t ed_content_len(char* buf) {
-    uint16_t len = 0;
-    while (buf[len] != 0) len++;
-    return len;
-}
-
-uint16_t ed_count_lines(char* buf) {
-    uint16_t count = 0;
-    while (*buf != 0) {
-        if (*buf == '\n') count++;
-        buf++;
-    }
-    return count;
-}
-
-// Returns pointer to start of line n (1-based), or null if out of range.
-char* ed_find_line(char* buf, uint16_t n) {
-    if (n == 0) return nullptr;
-    char* p = buf;
-    uint16_t cur = 1;
-    while (*p != 0) {
-        if (cur == n) return p;
-        if (*p == '\n') cur++;
-        p++;
-    }
-    return nullptr;
-}
-
-// Returns pointer to the \n at end of line n, or null.
-char* ed_find_line_end(char* buf, uint16_t n) {
-    char* start = ed_find_line(buf, n);
-    if (!start) return nullptr;
-    while (*start != '\n' && *start != 0) start++;
-    return (*start == '\n') ? start : nullptr;
-}
-
-void term_putdec(uint16_t val) {
-    char tmp[6];
-    uint8_t i = 0;
-    if (val == 0) {
-        term_putchar('0');
-        return;
-    }
-    while (val > 0) {
-        tmp[i++] = '0' + (val % 10);
-        val /= 10;
-    }
-    while (i > 0) {
-        term_putchar(tmp[--i]);
-    }
-}
-
-// Insert text+\n after line `after` (0 = insert at beginning).
-// Returns true on success.
-bool ed_insert_after(char* buf, uint16_t max_len, uint16_t after, const char* text) {
-    uint16_t text_len = strlen(text);
-    uint16_t insert_len = text_len + 1;  // text + \n
-    uint16_t cur_len = ed_content_len(buf);
-    if (cur_len + insert_len + 1 > max_len) {
-        term_putstr("Buffer full\n");
-        return false;
-    }
-
-    // Find insertion point
-    char* pos;
-    if (after == 0) {
-        pos = buf;
-    } else {
-        pos = ed_find_line_end(buf, after);
-        if (!pos) {
-            // Append at end
-            pos = buf + cur_len;
-        } else {
-            pos++;  // past the \n
-        }
-    }
-
-    // Shift content forward
-    uint16_t tail_len = cur_len - (uint16_t)(pos - buf);
-    for (uint16_t i = tail_len + 1; i > 0; i--) {
-        pos[i - 1 + insert_len] = pos[i - 1];
-    }
-
-    // Copy in the new line
-    for (uint16_t i = 0; i < text_len; i++) {
-        pos[i] = text[i];
-    }
-    pos[text_len] = '\n';
-
-    return true;
-}
-
-// Delete lines from..to (inclusive, 1-based).
-bool ed_delete_lines(char* buf, uint16_t from, uint16_t to) {
-    char* start = ed_find_line(buf, from);
-    if (!start) return false;
-    char* end = ed_find_line_end(buf, to);
-    if (!end) return false;
-    end++;  // past the \n
-
-    // Shift content back
-    uint16_t remaining = ed_content_len(buf) - (uint16_t)(end - buf);
-    for (uint16_t i = 0; i <= remaining; i++) {
-        start[i] = end[i];
-    }
-    return true;
-}
-
-// Parse "N", "N,M", or "," from str. Returns pointer past the parsed range.
-// Sets from/to. If no number before comma, from=1. If no number after, to=last.
-const char* ed_parse_range(const char* str, uint16_t total, uint16_t cur,
-                           uint16_t* from, uint16_t* to, bool* has_comma) {
-    *has_comma = false;
-    *from = cur;
-    *to = cur;
-
-    // Parse first number
-    bool has_first = false;
-    uint16_t n = 0;
-    while (*str >= '0' && *str <= '9') {
-        n = n * 10 + (*str - '0');
-        has_first = true;
-        str++;
-    }
-    if (has_first) {
-        *from = n;
-        *to = n;
-    }
-
-    if (*str == ',') {
-        *has_comma = true;
-        str++;
-        if (!has_first) *from = 1;
-        // Parse second number
-        bool has_second = false;
-        n = 0;
-        while (*str >= '0' && *str <= '9') {
-            n = n * 10 + (*str - '0');
-            has_second = true;
-            str++;
-        }
-        *to = has_second ? n : total;
-    }
-
-    return str;
-}
-
-void cmd_ed(const char* args) {
-    // Parse: <hex_addr> <hex_maxlen>
-    // Find space separator
-    const char* p = args;
-    while (*p != ' ' && *p != 0) p++;
-    if (*p == 0) {
-        term_putstr("Usage: ed <addr> <maxlen>\n");
-        return;
-    }
-
-    // Null-terminate the first arg temporarily by copying
-    char addr_str[5];
-    uint8_t addr_len = (uint8_t)(p - args);
-    if (addr_len > 4) { term_putstr("Bad address\n"); return; }
-    for (uint8_t i = 0; i < addr_len; i++) addr_str[i] = args[i];
-    addr_str[addr_len] = 0;
-
-    uint16_t addr, max_len;
-    if (!parse_hex(addr_str, &addr)) { term_putstr("Bad address\n"); return; }
-    p++;  // skip space
-    if (!parse_hex(p, &max_len)) { term_putstr("Bad length\n"); return; }
-    if (max_len < 2) { term_putstr("Buffer too small\n"); return; }
-
-    char* buf = (char*)addr;
-    // Initialize buffer if first byte isn't printable or \n
-    // (assume empty if it looks like garbage)
-
-    static char line_buf[255];
-    uint16_t cur_line = 0;
-
-    term_putstr("ed at $");
-    term_puthex16(addr);
-    term_putstr(" len $");
-    term_puthex16(max_len);
-    term_putstr("\n");
-
-    while (true) {
-        uint16_t total = ed_count_lines(buf);
-
-        term_getline(line_buf);
-        if (line_buf[0] == 0) continue;
-
-        // Quit
-        if (line_buf[0] == 'q' && line_buf[1] == 0) {
+        if (section_addr < 0x0400) {
+            term_putstr("invalid section address ");
+            term_puthex16(section_addr);
+            term_putstr("\n");
             return;
         }
-
-        uint16_t from, to;
-        bool has_comma;
-        const char* cmd = ed_parse_range(line_buf, total, cur_line, &from, &to, &has_comma);
-
-        char op = *cmd;
-
-        if (op == 'p') {
-            // Print
-            if (from == 0) from = 1;
-            if (to == 0) to = total;
-            for (uint16_t i = from; i <= to; i++) {
-                char* lp = ed_find_line(buf, i);
-                if (!lp) break;
-                term_putdec(i);
-                term_putchar('\t');
-                while (*lp != '\n' && *lp != 0) {
-                    term_putchar(*lp);
-                    lp++;
-                }
-                term_putchar('\n');
-            }
-        } else if (op == 'a') {
-            // Append after line
-            uint16_t after = from;
-            while (true) {
-                term_getline(line_buf);
-                if (line_buf[0] == '.' && line_buf[1] == 0) break;
-                if (ed_insert_after(buf, max_len, after, line_buf)) {
-                    after++;
-                    cur_line = after;
-                }
-            }
-        } else if (op == 'd') {
-            // Delete
-            if (from == 0 || to == 0) {
-                term_putstr("?\n");
-            } else if (ed_delete_lines(buf, from, to)) {
-                total = ed_count_lines(buf);
-                if (cur_line > total) cur_line = total;
+        uint8_t bank = buf[idx++];
+        if (bank != 0xFF) {
+            (*(volatile uint8_t*)0xE040) = bank;
+        }
+        uint16_t section_len = buf[idx++];
+        section_len |= buf[idx++] << 8;
+        if (section_addr + section_len > 0xdfff) {
+            term_putstr("section 0x");
+            term_puthex16(current_section);
+            term_putstr(" out of bounds\n");
+            return;
+        }
+        uint8_t* section_data = (uint8_t*)section_addr;
+        
+        while (section_len > 0) {
+            if (idx < len) {
+                *section_data++ = buf[idx++];
+                section_len--;
             } else {
-                term_putstr("?\n");
+                // Buffer is empty, read another chunk
+                len = blocking_read(buf);
+                idx = 0;
             }
-        } else if (op == 0 && from != cur_line) {
-            // Bare number: set current line and print it
-            if (from >= 1 && from <= total) {
-                cur_line = from;
-                char* lp = ed_find_line(buf, cur_line);
-                if (lp) {
-                    term_putdec(cur_line);
-                    term_putchar('\t');
-                    while (*lp != '\n' && *lp != 0) {
-                        term_putchar(*lp);
-                        lp++;
-                    }
-                    term_putchar('\n');
-                }
-            } else {
-                term_putstr("?\n");
-            }
-        } else {
-            term_putstr("?\n");
         }
-    }
-}
 
-// --- asm: minimal 6502 assembler (SAN notation, hex operands only) ---
-
-enum AsmMode : uint8_t {
-    M_IMP = 0, M_A, M_IMM, M_D, M_DX, M_DY, M_DXI, M_DIY, M_X, M_Y, M_I
-};
-
-// Operand byte count per mode (M_IMP=2 for absolute, overridden to 0 for implied)
-static const uint8_t mode_opsize[] = { 2, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2 };
-
-// Pack 3 lowercase ASCII chars into a uint16_t for fast comparison
-static uint16_t pack3(const char* s) {
-    return ((uint16_t)(s[0] - 'a') << 10) | ((uint16_t)(s[1] - 'a') << 5) | (s[2] - 'a');
-}
-
-// Parse SAN dot-suffix, return mode. *p points after mnemonic on entry,
-// advanced past suffix on return.
-static AsmMode parse_suffix(const char** p) {
-    if (**p != '.') return M_IMP;
-    (*p)++;
-    char c = **p;
-    if (c == '#') { (*p)++; return M_IMM; }
-    if (c == 'a') { (*p)++; return M_A; }
-    if (c == 'i') { (*p)++; return M_I; }
-    if (c == 'x') { (*p)++; return M_X; }
-    if (c == 'y') { (*p)++; return M_Y; }
-    if (c == 'd') {
-        (*p)++;
-        c = **p;
-        if (c == 'x') {
-            (*p)++;
-            if (**p == 'i') { (*p)++; return M_DXI; }
-            return M_DX;
-        }
-        if (c == 'i') {
-            (*p)++;
-            if (**p == 'y') { (*p)++; return M_DIY; }
-            return M_I;  // .di not valid, treat as error later
-        }
-        if (c == 'y') { (*p)++; return M_DY; }
-        return M_D;
-    }
-    return M_IMP;  // unknown suffix
-}
-
-// Group A (cc=01): ora and eor adc sta lda cmp sbc
-static const uint16_t grp_a[] = {
-    0x3A20, 0x01A3, 0x11D1, 0x0062, 0x4A60, 0x2C60, 0x098F, 0x4822
-};
-// Mode -> bbb for cc=01
-// M_IMP->3(abs), M_IMM->2, M_D->1, M_DX->5, M_DXI->0, M_DIY->4, M_X->7, M_Y->6
-static const uint8_t cc01_bbb[] = { 3, 0xFF, 2, 1, 5, 0xFF, 0, 4, 7, 6, 0xFF };
-
-// Group B (cc=10): asl rol lsr ror stx ldx dec inc
-static const uint16_t grp_b[] = {
-    0x024B, 0x45CB, 0x2E51, 0x45D1, 0x4A77, 0x2C77, 0x0C82, 0x21A2
-};
-// Mode -> bbb for cc=10
-// M_IMP->3(abs), M_A->2, M_IMM->0, M_D->1, M_DX->5, M_DY->5, M_X->7, M_Y->7
-static const uint8_t cc10_bbb[] = { 3, 2, 0, 1, 5, 5, 0xFF, 0xFF, 7, 7, 0xFF };
-
-// Group C (cc=00): bit sty ldy cpy cpx
-static const uint16_t grp_c[] = {
-    0x0513, 0x4A78, 0x2C78, 0x09F8, 0x09F7
-};
-static const uint8_t grp_c_aaa[] = { 1, 4, 5, 6, 7 };
-// Mode -> bbb for cc=00
-static const uint8_t cc00_bbb[] = { 3, 0xFF, 0, 1, 5, 0xFF, 0xFF, 0xFF, 7, 0xFF, 0xFF };
-
-// Branches: bpl bmi bvc bvs bcc bcs bne beq
-static const uint16_t grp_br[] = {
-    0x05EB, 0x0588, 0x06A2, 0x06B2, 0x0442, 0x0452, 0x05A4, 0x0490
-};
-
-// Implied instructions: packed mnemonic + opcode
-static const uint16_t imp_mn[] = {
-    0x062A, // brk
-    0x3CEF, // php
-    0x3D6F, // plp
-    0x3CE0, // pha
-    0x3D60, // pla
-    0x4668, // rti
-    0x4672, // rts
-    0x0962, // clc
-    0x4882, // sec
-    0x0968, // cli
-    0x4888, // sei
-    0x0975, // clv
-    0x0963, // cld
-    0x4883, // sed
-    0x0C98, // dey
-    0x4F00, // tya
-    0x4C18, // tay
-    0x21B8, // iny
-    0x0C97, // dex
-    0x4EE0, // txa
-    0x4C17, // tax
-    0x21B7, // inx
-    0x35CF, // nop
-    0x4EF2, // txs
-    0x4E57, // tsx
-};
-static const uint8_t imp_op[] = {
-    0x00, 0x08, 0x28, 0x48, 0x68, 0x40, 0x60,
-    0x18, 0x38, 0x58, 0x78, 0xB8, 0xD8, 0xF8,
-    0x88, 0x98, 0xA8, 0xC8, 0xCA, 0x8A, 0xAA, 0xE8, 0xEA, 0x9A, 0xBA
-};
-
-void cmd_asm(const char* args) {
-    // Parse: <text_addr> <code_addr>
-    const char* p = args;
-    while (*p != ' ' && *p != 0) p++;
-    if (*p == 0) {
-        term_putstr("Usage: asm <text> <code>\n");
-        return;
+        current_section++;
     }
 
-    char tmp[5];
-    uint8_t len = (uint8_t)(p - args);
-    if (len > 4) { term_putstr("?\n"); return; }
-    for (uint8_t i = 0; i < len; i++) tmp[i] = args[i];
-    tmp[len] = 0;
-
-    uint16_t text_addr, code_addr;
-    if (!parse_hex(tmp, &text_addr)) { term_putstr("?\n"); return; }
-    p++;
-    if (!parse_hex(p, &code_addr)) { term_putstr("?\n"); return; }
-
-    char* src = (char*)text_addr;
-    uint8_t* dest = (uint8_t*)code_addr;
-    uint16_t line_num = 0;
-
-    while (*src != 0) {
-        line_num++;
-        // Find end of line
-        const char* eol = src;
-        while (*eol != '\n' && *eol != 0) eol++;
-
-        // Skip blank lines
-        if (eol == src) {
-            src = (char*)eol + (*eol == '\n' ? 1 : 0);
-            continue;
-        }
-
-        // Declare all variables before any goto
-        uint16_t mn;
-        const char* cp;
-        AsmMode mode;
-        uint16_t operand = 0;
-        bool has_operand = false;
-        uint8_t opcode = 0;
-        uint8_t op_bytes = 0;
-        bool found = false;
-        char hex_buf[5];
-        uint8_t hi;
-
-        // Parse mnemonic (3 chars)
-        if (eol - src < 3) goto err;
-        mn = pack3(src);
-        cp = src + 3;
-
-        // Parse suffix
-        mode = parse_suffix(&cp);
-
-        // Skip space, parse optional hex operand
-        if (*cp == ' ') {
-            cp++;
-            hi = 0;
-            while (cp < eol && hi < 4) {
-                hex_buf[hi++] = *cp++;
-            }
-            hex_buf[hi] = 0;
-            if (hi > 0) {
-                if (!parse_hex(hex_buf, &operand)) goto err;
-                has_operand = true;
-            }
-        }
-        if (mode == M_IMP && !has_operand) {
-            for (uint8_t i = 0; i < 25; i++) {
-                if (imp_mn[i] == mn) {
-                    opcode = imp_op[i];
-                    op_bytes = 0;
-                    found = true;
-                    break;
-                }
-            }
-        }
-
-        // Try Group A (cc=01)
-        if (!found) {
-            for (uint8_t i = 0; i < 8; i++) {
-                if (grp_a[i] == mn) {
-                    uint8_t bbb = cc01_bbb[mode];
-                    if (bbb == 0xFF) goto err;
-                    // STA immediate is invalid
-                    if (i == 4 && mode == M_IMM) goto err;
-                    opcode = (i << 5) | (bbb << 2) | 0x01;
-                    op_bytes = mode_opsize[mode];
-                    found = true;
-                    break;
-                }
-            }
-        }
-
-        // Try Group B (cc=10)
-        if (!found) {
-            for (uint8_t i = 0; i < 8; i++) {
-                if (grp_b[i] == mn) {
-                    // STX/LDX: accept .dy/.y, reject .dx/.x
-                    if (i == 4 || i == 5) {
-                        if (mode == M_DX || mode == M_X) goto err;
-                    } else {
-                        if (mode == M_DY || mode == M_Y) goto err;
-                    }
-                    // Only LDX gets immediate
-                    if (mode == M_IMM && i != 5) goto err;
-                    // DEC/INC: no accumulator
-                    if (mode == M_A && (i == 6 || i == 7)) goto err;
-                    // STX: no accumulator or immediate
-                    if (i == 4 && (mode == M_A || mode == M_IMM)) goto err;
-                    uint8_t bbb = cc10_bbb[mode];
-                    if (bbb == 0xFF) goto err;
-                    opcode = (i << 5) | (bbb << 2) | 0x02;
-                    op_bytes = mode_opsize[mode];
-                    found = true;
-                    break;
-                }
-            }
-        }
-
-        // Try Group C (cc=00)
-        if (!found) {
-            for (uint8_t i = 0; i < 5; i++) {
-                if (grp_c[i] == mn) {
-                    uint8_t bbb = cc00_bbb[mode];
-                    if (bbb == 0xFF) goto err;
-                    // BIT: only .d and abs
-                    if (i == 0 && mode != M_D && mode != M_IMP) goto err;
-                    // STY: no immediate
-                    if (i == 1 && mode == M_IMM) goto err;
-                    opcode = (grp_c_aaa[i] << 5) | (bbb << 2) | 0x00;
-                    op_bytes = mode_opsize[mode];
-                    found = true;
-                    break;
-                }
-            }
-        }
-
-        // Try branches
-        if (!found) {
-            for (uint8_t i = 0; i < 8; i++) {
-                if (grp_br[i] == mn) {
-                    if (!has_operand) goto err;
-                    opcode = i * 0x20 + 0x10;
-                    // Compute relative offset: target - (pc + 2)
-                    {
-                        uint16_t pc = (uint16_t)(uintptr_t)dest;
-                        int16_t offset = (int16_t)(operand - (pc + 2));
-                        if (offset < -128 || offset > 127) {
-                            term_putstr("range\n");
-                            goto err_noprint;
-                        }
-                        *dest++ = opcode;
-                        *dest++ = (uint8_t)(offset & 0xFF);
-                        term_puthex16(pc);
-                        term_putstr(": ");
-                        term_puthex(opcode);
-                        term_putchar(' ');
-                        term_puthex((uint8_t)(offset & 0xFF));
-                        term_putchar('\n');
-                    }
-                    found = true;
-                    goto next_line;
-                }
-            }
-        }
-
-        // Try JMP/JSR
-        if (!found) {
-            if (mn == pack3("jmp")) {
-                if (mode == M_I) {
-                    opcode = 0x6C;
-                } else if (mode == M_IMP) {
-                    opcode = 0x4C;
-                } else {
-                    goto err;
-                }
-                op_bytes = 2;
-                found = true;
-            } else if (mn == pack3("jsr") && mode == M_IMP) {
-                opcode = 0x20;
-                op_bytes = 2;
-                found = true;
-            }
-        }
-
-        if (!found) goto err;
-
-        {
-            // Emit opcode + operand
-            uint16_t pc = (uint16_t)(uintptr_t)dest;
-            *dest++ = opcode;
-            term_puthex16(pc);
-            term_putstr(": ");
-            term_puthex(opcode);
-            if (op_bytes >= 1) {
-                *dest++ = operand & 0xFF;
-                term_putchar(' ');
-                term_puthex(operand & 0xFF);
-            }
-            if (op_bytes >= 2) {
-                *dest++ = (operand >> 8) & 0xFF;
-                term_putchar(' ');
-                term_puthex((operand >> 8) & 0xFF);
-            }
-            term_putchar('\n');
-        }
-        goto next_line;
-
-    err:
-        term_putstr("? line ");
-        term_putdec(line_num);
-        term_putchar('\n');
-    err_noprint:
-        return;
-
-    next_line:
-        src = (char*)eol + (*eol == '\n' ? 1 : 0);
-    }
-
-    uint16_t total = (uint16_t)(uintptr_t)dest - code_addr;
-    term_putdec(total);
-    term_putstr(" bytes\n");
-}
-
-bool starts_with(const char* str, const char* prefix) {
-    while (*prefix != 0) {
-        if (*str != *prefix) {
-            return false;
-        }
-        str++;
-        prefix++;
-    }
-    return true;
+    term_putstr("Load complete, entrypoint=0x");
+    term_puthex16(entrypoint);
+    term_putstr("\n");
+    ((void (*)(void))entrypoint)();
 }
 
 int main() {
-    static uint8_t recv_buf[255];
     lcd_init();
     lcd_putstr("Waiting for Zero...");
 
     do {
-        uint8_t len = io_read(0, recv_buf);
+        uint8_t len = io_read(0, buf);
         if (len != 2) {
             lcd_instruction(LCD_I_DDRAM | 0x40);  // Move to second line
             lcd_putstr("Bad len on dev 0");
             return 1;
         }
-    } while (recv_buf[1] == 0);
+    } while (buf[1] == 0);
 
     lcd_reset();
     lcd_putstr("Ready");
@@ -794,19 +269,15 @@ int main() {
     term_putstr("Mattbrew 6502 ready\n\n");
     while (true) {
         term_putstr("> ");
-        term_getline((char*)recv_buf);
-        if (starts_with((char*)recv_buf, "lcd ")) {
+        term_getline((char*)buf);
+        if (starts_with((char*)buf, "lcd ")) {
             lcd_reset();
-            lcd_putstr((char*)recv_buf + 4);
-        } else if (starts_with((char*)recv_buf, "load ")) {
-            cmd_load((char*)recv_buf + 5);
-        } else if (starts_with((char*)recv_buf, "ed ")) {
-            cmd_ed((char*)recv_buf + 3);
-        } else if (starts_with((char*)recv_buf, "asm ")) {
-            cmd_asm((char*)recv_buf + 4);
-        } else if (starts_with((char*)recv_buf, "peek ")) {
+            lcd_putstr((char*)buf + 4);
+        } else if (starts_with((char*)buf, "load ")) {
+            cmd_load((char*)buf + 5);
+        } else if (starts_with((char*)buf, "peek ")) {
             uint16_t address;
-            bool ok = parse_hex((char*)recv_buf + 5, &address);
+            bool ok = parse_hex((char*)buf + 5, &address);
             if (ok) {
                 uint8_t value = *(volatile uint8_t*)address;
                 term_puthex16(address);
@@ -815,7 +286,49 @@ int main() {
                 term_putstr("\n");
             } else {
                 term_putstr("Invalid address ");
-                term_putstr((char*)recv_buf + 5);
+                term_putstr((char*)buf + 5);
+                term_putstr("\n");
+            }
+        } else if (starts_with((char*)buf, "poke ")) {
+            char* args = (char*)buf + 5;
+            char* space = nullptr;
+            for (char* p = args; *p != 0; p++) {
+                if (*p == ' ') {
+                    space = p;
+                    break;
+                }
+            }
+            if (space == nullptr) {
+                term_putstr("Usage: poke <address> <value>\n");
+                continue;
+            }
+            *space = 0;  // Split into two strings
+            char* addr_str = args;
+            char* value_str = space + 1;
+
+            uint16_t address;
+            uint8_t value;
+            bool ok = parse_hex(addr_str, &address) && parse_hex(value_str, (uint16_t*)&value);
+            if (ok) {
+                *(volatile uint8_t*)address = value;
+                term_puthex16(address);
+                term_putstr(" <= ");
+                term_puthex(value);
+                term_putstr("\n");
+            } else {
+                term_putstr("Usage: poke <address> <value>\n");
+            }
+        } else if (starts_with((char*)buf, "jump ")) {
+            uint16_t address;
+            bool ok = parse_hex((char*)buf + 5, &address);
+            if (ok) {
+                term_putstr("=> ");
+                term_puthex16(address);
+                term_putstr("\n");
+                ((void (*)(void))address)();
+            } else {
+                term_putstr("Invalid address ");
+                term_putstr((char*)buf + 5);
                 term_putstr("\n");
             }
         } else {

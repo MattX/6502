@@ -322,18 +322,13 @@ impl DeviceHandler for RealDevices {
             3 => {
                 let name = String::from_utf8_lossy(data).to_string();
                 if let Some(file_data) = self.uploaded_files.get(&name) {
-                    let total_len = file_data.len() as u16;
-                    let mut prefixed = Vec::with_capacity(2 + file_data.len());
-                    prefixed.push((total_len >> 8) as u8);
-                    prefixed.push((total_len & 0xFF) as u8);
-                    prefixed.extend_from_slice(file_data);
                     self.netboot = Some(NetbootState {
-                        data: prefixed,
+                        data: file_data.clone(),
                         offset: 0,
                     });
                 } else {
                     self.netboot = Some(NetbootState {
-                        data: vec![0, 0],
+                        data: vec![],
                         offset: 0,
                     });
                 }
@@ -357,7 +352,7 @@ impl DeviceHandler for RealDevices {
                 buf.push(1);
             }
             2 => {
-                let available = self.keyboard_in.len().min(254);
+                let available = self.keyboard_in.len().min(16);
                 buf.push(available as u8);
                 for _ in 0..available {
                     if let Some(b) = self.keyboard_in.pop_front() {
@@ -368,7 +363,7 @@ impl DeviceHandler for RealDevices {
             3 => {
                 if let Some(ref mut nb) = self.netboot {
                     let remaining = nb.data.len() - nb.offset;
-                    let chunk = remaining.min(254);
+                    let chunk = remaining.min(128);
                     buf.push(chunk as u8);
                     for i in 0..chunk {
                         buf.push(nb.data[nb.offset + i]);

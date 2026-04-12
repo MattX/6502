@@ -18,6 +18,8 @@ use terminal::Terminal;
 use ui::StatusInfo;
 
 const MAX_TLV_DATA: usize = 254; // 255 reserved for busy
+const MAX_KB_TLV_DATA: usize = 16; // Device 2: keyboard — limits 6502-side read buffer requirements
+const MAX_NETBOOT_TLV_DATA: usize = 128; // Device 3: netboot — limits 6502-side read buffer requirements
 const LOG_CAPACITY: usize = 1000;
 const BUS_MAX_BUFFER_SIZE: u16 = 4096; // Per-device buffer capacity on Pico
 
@@ -197,7 +199,12 @@ impl App {
             self.log(format!("enqueue_tlv: device {device} out of range, dropped"));
             return;
         }
-        for chunk in data.chunks(MAX_TLV_DATA) {
+        let chunk_size = match device {
+            2 => MAX_KB_TLV_DATA,
+            3 => MAX_NETBOOT_TLV_DATA,
+            _ => MAX_TLV_DATA,
+        };
+        for chunk in data.chunks(chunk_size) {
             let mut payload = Vec::with_capacity(2 + chunk.len());
             payload.push(device);
             payload.push(chunk.len() as u8);

@@ -7,7 +7,7 @@ ASSERT(__rc31 == 0xff, "Inconsistent zero page map.")
 
 MEMORY {
   zp : ORIGIN = 0x00, LENGTH = 0xe0
-  ram : ORIGIN = 0x200, LENGTH = 0xa000 - 0x200
+  ram : ORIGIN = 0x200, LENGTH = 0x400 - 0x200
   rom_header : ORIGIN = 0xe000, LENGTH = 0x100
   rom : ORIGIN = 0xe100, LENGTH = 0xfffa - 0xe100
 }

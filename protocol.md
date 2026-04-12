@@ -90,6 +90,10 @@ characters sent as-is, others (arrows, escape, etc) sent as ANSI escapes.
 Will switch to a more raw mode later to support stuff like games, where modifier
 keys and keyup / keydown are useful.
 
+Each TLV packet from the Zero carries at most **16 bytes** of keyboard data.
+Key sequences are at most a few bytes, so this limit is never a practical
+constraint; it keeps the 6502 read buffer requirements small.
+
 ### Netboot
 
 The 6502 writes a filename (as raw bytes, no null terminator) to device 3. The
@@ -102,8 +106,9 @@ followed by the file contents:
 ```
 
 If the file is not found, the Zero responds with length 0x0000. Data is
-delivered across multiple TLV reads (max 254 bytes each); the 6502 reads
-repeatedly until it has received `len` bytes total.
+delivered across multiple TLV reads (max **128 bytes** each); the 6502 reads
+repeatedly until it has received `len` bytes total. The 128-byte cap keeps
+the 6502-side read buffer requirements small.
 
 This is intended for the ROM bootloader to load programs to RAM (at $0400)
 then jump to them, avoiding constant ROM reflashes.

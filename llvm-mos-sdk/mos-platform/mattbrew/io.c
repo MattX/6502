@@ -3,11 +3,8 @@
 
 #define IO_PORT (*(volatile uint8_t *)RPI_BASE)
 
-extern volatile uint8_t io_busy;
-
 // Core read — returns bytes read (0 = no data)
 uint8_t io_read(uint8_t device_id, uint8_t *buf) {
-    ++io_busy;
     IO_PORT = device_id | 0x80;
 
     uint8_t len;
@@ -16,7 +13,6 @@ uint8_t io_read(uint8_t device_id, uint8_t *buf) {
     for (uint8_t i = 0; i < len; i++) {
         buf[i] = IO_PORT;
     }
-    --io_busy;
     return len;
 }
 
