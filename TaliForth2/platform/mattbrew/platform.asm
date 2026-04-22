@@ -5,7 +5,7 @@
 ;
 ; Memory map:
 ;   $0000-$007F  Zero page: Tali variables + data stack
-;   $0080-$0091  Zero page: keyboard ring buffer (kernel)
+;   $0080-$0091  Zero page: keyboard buffer (kernel)
 ;   $0100-$01FF  Return stack (hardware stack)
 ;   $0200-$02FF  Input buffer
 ;   $0400+       Tali code + kernel (this binary)
@@ -28,13 +28,12 @@ cp0 = $3C00                     ; dictionary starts after code
 ; I/O constants
 
 RPI_PORT = $E040                 ; single-byte I/O port to Pi Pico bridge
-DEV_STATUS   = 0                 ; device 0: status/availability
 DEV_VIDEO_KB = 2                 ; device 2: video (write) / keyboard (read)
 
-; Keyboard ring buffer in upper zero page
+; Keyboard buffer in upper zero page
 kb_head  = $80                   ; buffer read index (0-15)
 kb_count = $81                   ; number of bytes in buffer
-kb_buf   = $82                   ; 16-byte ring buffer ($82-$91)
+kb_buf   = $82                   ; 16-byte buffer ($82-$91)
 KB_SIZE  = 16
 
 ; =====================================================================

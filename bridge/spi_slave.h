@@ -67,6 +67,11 @@ uint spi_slave_tx_queue_len(void);
 // If IRQ is not already asserted, this will assert it.
 bool spi_slave_tx_queue(const uint8_t *data, uint16_t len);
 
+// Queue one complete TLV packet for the Zero to READ.
+// Returns false if the internal TX queue does not have room for the
+// header and payload together.
+bool spi_slave_tx_queue_tlv(uint8_t device, const uint8_t *data, uint8_t len);
+
 // Call regularly from main loop. Processes completed RX transactions,
 // handles REQUEST by preparing TX DMA and asserting READY, and
 // manages IRQ/READY state after READ completes.
@@ -77,6 +82,10 @@ void spi_slave_task(void);
 // it is only valid for the duration of the callback.
 typedef void (*spi_slave_rx_callback_t)(const uint8_t *data, uint16_t len);
 void spi_slave_set_rx_callback(spi_slave_rx_callback_t cb);
+
+// Handle GPIO IRQs owned by the SPI slave.
+// Call this from the bridge's shared GPIO IRQ callback.
+void spi_slave_gpio_irq(uint gpio, uint32_t events);
 
 // Returns true if at least one SPI command has been received from the Zero.
 bool spi_slave_is_connected(void);
@@ -91,6 +100,7 @@ typedef struct {
     uint32_t requests;          // REQUEST commands handled
     uint32_t proto_errors;      // Protocol errors (bad CMD, etc.)
     uint32_t rx_dma_overruns;   // RX DMA ring overruns (data lost)
+    bool     irq;               // Is IRQ currently asserted (for debugging)
 } spi_slave_stats_t;
 
 spi_slave_stats_t spi_slave_get_stats(void);

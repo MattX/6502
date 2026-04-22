@@ -9,9 +9,9 @@ mod hw {
     use std::time::{Duration, Instant};
 
     use anyhow::{Context, Result};
-    use gpiocdev::line::{Bias, EdgeDetection, Value};
     use gpiocdev::Request;
-    use spidev::{Spidev, SpidevOptions, SpidevTransfer, SpiModeFlags};
+    use gpiocdev::line::{Bias, EdgeDetection, Value};
+    use spidev::{SpiModeFlags, Spidev, SpidevOptions, SpidevTransfer};
 
     const SPI_CMD_WRITE: u8 = 0x01;
     const SPI_CMD_REQUEST: u8 = 0x02;
@@ -84,7 +84,11 @@ mod hw {
                 .request()
                 .context("Failed to request READY GPIO")?;
 
-            Ok(Self { spi, ready, buf: [0u16; super::NUM_DEVICES] })
+            Ok(Self {
+                spi,
+                ready,
+                buf: [0u16; super::NUM_DEVICES],
+            })
         }
 
         fn wait_ready(&self, timeout: Duration) -> Result<bool> {
@@ -128,7 +132,10 @@ mod hw {
             Ok(true)
         }
 
-        pub fn request_and_read(&mut self, timeout: Duration) -> Result<Option<(Vec<u8>, [u16; super::NUM_DEVICES])>> {
+        pub fn request_and_read(
+            &mut self,
+            timeout: Duration,
+        ) -> Result<Option<(Vec<u8>, [u16; super::NUM_DEVICES])>> {
             self.spi
                 .write_all(&[SPI_CMD_REQUEST])
                 .context("SPI REQUEST transfer failed")?;
@@ -167,8 +174,8 @@ mod hw {
 
 #[cfg(not(target_os = "linux"))]
 mod hw {
-    use std::time::Duration;
     use anyhow::Result;
+    use std::time::Duration;
 
     pub struct IrqWatcher;
 
@@ -197,7 +204,9 @@ mod hw {
 
     impl SpiMaster {
         pub fn new() -> Result<Self> {
-            Ok(Self { buf: [255 * 16; super::NUM_DEVICES] })
+            Ok(Self {
+                buf: [255 * 16; super::NUM_DEVICES],
+            })
         }
 
         pub fn write(&mut self, payload: &[u8]) -> Result<bool> {
@@ -207,7 +216,10 @@ mod hw {
             Ok(true)
         }
 
-        pub fn request_and_read(&mut self, _timeout: Duration) -> Result<Option<(Vec<u8>, [u16; super::NUM_DEVICES])>> {
+        pub fn request_and_read(
+            &mut self,
+            _timeout: Duration,
+        ) -> Result<Option<(Vec<u8>, [u16; super::NUM_DEVICES])>> {
             self.buf = [255 * 16; super::NUM_DEVICES];
             Ok(Some((Vec::new(), self.buf)))
         }

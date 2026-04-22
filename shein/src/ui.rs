@@ -1,10 +1,10 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Frame;
 
-use crate::terminal::{Terminal, COLS, ROWS};
+use crate::terminal::{COLS, ROWS, Terminal};
 
 const PANE_HEIGHT: u16 = ROWS as u16 + 2; // 25 content rows + 2 border rows
 const MIN_WIDTH: u16 = COLS as u16 + 2 + 20; // terminal + status minimum
@@ -17,12 +17,7 @@ pub struct StatusInfo {
     pub verbose: bool,
 }
 
-pub fn draw(
-    frame: &mut Frame,
-    terminal: &Terminal,
-    status: &StatusInfo,
-    log: &[String],
-) {
+pub fn draw(frame: &mut Frame, terminal: &Terminal, status: &StatusInfo, log: &[String]) {
     let area = frame.area();
     if area.height < MIN_HEIGHT || area.width < MIN_WIDTH {
         let msg = format!(
@@ -71,22 +66,29 @@ fn draw_terminal(frame: &mut Frame, terminal: &Terminal, area: Rect) {
         lines.push(Line::from(spans));
     }
 
-    let block = Block::default()
-        .title(" Terminal ")
-        .borders(Borders::ALL);
+    let block = Block::default().title(" Terminal ").borders(Borders::ALL);
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
 }
 
 fn draw_status(frame: &mut Frame, status: &StatusInfo, area: Rect) {
     let mut lines = vec![
-        Line::from(if status.connected { "Connected" } else { "Disconnected" }),
-        Line::from(format!("Verbose: {}", if status.verbose { "ON" } else { "off" })),
+        Line::from(if status.connected {
+            "Connected"
+        } else {
+            "Disconnected"
+        }),
+        Line::from(format!(
+            "Verbose: {}",
+            if status.verbose { "ON" } else { "off" }
+        )),
         Line::from(""),
         Line::from("Devices:"),
     ];
 
-    let device_names = ["Status", "System", "Video/KB", "Netboot", "Network", "Free", "Free", "Echo"];
+    let device_names = [
+        "Status", "System", "Video/KB", "Netboot", "Network", "Free", "Free", "Echo",
+    ];
     for (i, name) in device_names.iter().enumerate() {
         let active = status.device_status & (1 << i) != 0;
         let marker = if active { ">" } else { " " };
@@ -96,15 +98,19 @@ fn draw_status(frame: &mut Frame, status: &StatusInfo, area: Rect) {
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        lines.push(Line::styled(format!(" {marker} {i}: {name:<8} [{buf_val:>4}]"), style));
+        lines.push(Line::styled(
+            format!(" {marker} {i}: {name:<8} [{buf_val:>4}]"),
+            style,
+        ));
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::styled("F1 verbose | Ctrl-C quit", Style::default().fg(Color::DarkGray)));
+    lines.push(Line::styled(
+        "F1 verbose | Ctrl-C quit",
+        Style::default().fg(Color::DarkGray),
+    ));
 
-    let block = Block::default()
-        .title(" Status ")
-        .borders(Borders::ALL);
+    let block = Block::default().title(" Status ").borders(Borders::ALL);
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
 }
@@ -116,15 +122,20 @@ fn draw_log(frame: &mut Frame, log: &[String], area: Rect) {
     let lines: Vec<Line> = log.iter().map(|s| Line::from(s.as_str())).collect();
 
     // Calculate total visual rows accounting for line wrapping, then scroll to bottom.
-    let total_visual: usize = lines.iter().map(|line| {
-        let w = line.width();
-        if inner_width == 0 || w == 0 { 1 } else { w.div_ceil(inner_width) }
-    }).sum();
+    let total_visual: usize = lines
+        .iter()
+        .map(|line| {
+            let w = line.width();
+            if inner_width == 0 || w == 0 {
+                1
+            } else {
+                w.div_ceil(inner_width)
+            }
+        })
+        .sum();
     let scroll_offset = total_visual.saturating_sub(inner_height) as u16;
 
-    let block = Block::default()
-        .title(" Log ")
-        .borders(Borders::ALL);
+    let block = Block::default().title(" Log ").borders(Borders::ALL);
     let paragraph = Paragraph::new(lines)
         .block(block)
         .wrap(Wrap { trim: false })

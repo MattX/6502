@@ -28,6 +28,7 @@
 #include "hardware/pwm.h"
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
+#include "hardware/irq.h"
 #include "hardware/watchdog.h"
 #include "pico/stdlib.h"
 #include "bus_interface.h"
@@ -73,18 +74,15 @@ static uint8_t device0_tx_callback(uint8_t *data, uint8_t max_len) {
 // ============================================================================
 
 static void bus_to_spi_callback(uint8_t device, const uint8_t *data, uint16_t len) {
-    // Bus transfers are max 255 bytes, so len fits in uint8_t
-    uint8_t header[2] = { device, (uint8_t)len };
-
-    // Check space upfront to avoid orphaning a header in the queue
+    // Bus transfers are max 255 bytes, so len fits in uint8_t.
+    // Check space upfront so each bus message is queued atomically.
     uint free = spi_slave_tx_queue_free();
     DBG_PRINTF("bus->spi: dev=%d len=%d free=%d\n", device, len, free);
     if (free < len + 2) {
         printf("bus->spi: queue full, dropping\n");
         return;
     }
-    spi_slave_tx_queue(header, 2);
-    spi_slave_tx_queue(data, len);
+    spi_slave_tx_queue_tlv(device, data, (uint8_t)len);
 
     bus_to_spi_msgs++;
     bus_to_spi_bytes += len;
@@ -180,11 +178,12 @@ static void setup_6502_clock(void) {
 // RESB management
 // ============================================================================
 
-static void resb_fall_callback(uint gpio, uint32_t events) {
-    (void)events;
-    if (gpio == PIN_6502_RESB) {
+static void bridge_gpio_irq_callback(uint gpio, uint32_t events) {
+    if (gpio == PIN_6502_RESB && (events & GPIO_IRQ_EDGE_FALL)) {
         reset_requested = true;
     }
+
+    spi_slave_gpio_irq(gpio, events);
 }
 
 static void bridge_reset(void) {
@@ -260,6 +259,11 @@ int main(void) {
 
     bus_start();
 
+    // GPIO IRQ callbacks are shared per core, so install one dispatcher
+    // and let each subsystem enable only the pins it owns.
+    gpio_set_irq_callback(bridge_gpio_irq_callback);
+    irq_set_enabled(IO_IRQ_BANK0, true);
+
     // --- SPI slave ---
     if (!spi_slave_init()) {
         printf("ERROR: spi_slave_init failed\n");
@@ -271,8 +275,7 @@ int main(void) {
     gpio_set_dir(PIN_6502_RESB, GPIO_IN);  // Tristate = release (external pull-up)
 
     // --- RESB falling-edge interrupt for external resets ---
-    gpio_set_irq_enabled_with_callback(PIN_6502_RESB, GPIO_IRQ_EDGE_FALL, true,
-                                       resb_fall_callback);
+    gpio_set_irq_enabled(PIN_6502_RESB, GPIO_IRQ_EDGE_FALL, true);
 
     uint32_t boot_time = to_ms_since_boot(get_absolute_time());
     uint32_t last_stats = boot_time;
@@ -288,6 +291,11 @@ int main(void) {
         if (ch == 'R') {
             printf("Reboot requested via USB\n");
             reset_requested = true;
+        } else if (ch == 'S') {
+            printf("Simulating SPI TX data for device 2\n");
+            // Simulate data received in device 2
+            uint8_t test_data[] = { 'A', 'B', 'C' };
+            bus_to_spi_callback(2, test_data, sizeof(test_data));  // Directly invoke callback to simulate RX data from bus
         }
 
         bus_task();
@@ -323,18 +331,19 @@ int main(void) {
                    (unsigned long)spi_to_bus_bytes,
                    (unsigned long)spi_to_bus_drops);
 
-            printf("       bus: rx=%lu tx=%lu overruns=%lu bankrupt=%lu underflows=%lu\n",
+            printf("       bus: rx=%lu tx=%lu overruns=%lu bankrupt=%lu empty_reads=%lu\n",
                    (unsigned long)bs.rx_bytes,
                    (unsigned long)bs.tx_bytes,
                    (unsigned long)bs.rx_dma_overruns,
                    (unsigned long)bs.rx_bankruptcies,
-                   (unsigned long)bs.tx_underflows);
+                   (unsigned long)bs.tx_empty_reads);
 
-            printf("       spi: wr=%lu rd=%lu req=%lu proto_err=%lu\n",
+            printf("       spi: wr=%lu rd=%lu req=%lu proto_err=%lu irq=%lu\n",
                    (unsigned long)ss.rx_writes,
                    (unsigned long)ss.tx_reads,
                    (unsigned long)ss.requests,
-                   (unsigned long)ss.proto_errors);
+                   (unsigned long)ss.proto_errors,
+                   (unsigned long)ss.irq);
 
 #if BRIDGE_DEBUG
             bus_diagnose();

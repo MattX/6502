@@ -59,20 +59,20 @@ bool starts_with(const char* str, const char* prefix) {
 // ===================
 
 void lcd_putstr(const char* msg) {
-    while (*msg != 0) {
-        lcd_putchar(*msg);
-        msg++;
-    }
+    // while (*msg != 0) {
+    //     lcd_putchar(*msg);
+    //     msg++;
+    // }
 }
 
 void lcd_reset() {
-    lcd_instruction(LCD_I_CLEAR);
-    lcd_instruction(LCD_I_HOME);
+    // lcd_instruction(LCD_I_CLEAR);
+    // lcd_instruction(LCD_I_HOME);
 }
 
 void lcd_puthex(uint8_t val) {
-    lcd_putchar(nibble_char(val >> 4));
-    lcd_putchar(nibble_char(val));
+    // lcd_putchar(nibble_char(val >> 4));
+    // lcd_putchar(nibble_char(val));
 }
 
 // ===================
@@ -251,28 +251,29 @@ void cmd_load(const char* name) {
 }
 
 int main() {
-    lcd_init();
-    lcd_putstr("Waiting for Zero...");
+    // lcd_init();
+    // lcd_putstr("Waiting for Zero...");
 
     do {
         uint8_t len = io_read(0, buf);
         if (len != 2) {
-            lcd_instruction(LCD_I_DDRAM | 0x40);  // Move to second line
-            lcd_putstr("Bad len on dev 0");
+            // lcd_instruction(LCD_I_DDRAM | 0x40);  // Move to second line
+            // lcd_putstr("Bad len on dev 0");
             return 1;
         }
     } while (buf[1] == 0);
 
-    lcd_reset();
-    lcd_putstr("Ready");
+    // lcd_reset();
+    // lcd_putstr("Ready");
 
     term_putstr("Mattbrew 6502 ready\n\n");
     while (true) {
         term_putstr("> ");
         term_getline((char*)buf);
         if (starts_with((char*)buf, "lcd ")) {
-            lcd_reset();
-            lcd_putstr((char*)buf + 4);
+            term_putstr("LCD disabled\n");
+            // lcd_reset();
+            // lcd_putstr((char*)buf + 4);
         } else if (starts_with((char*)buf, "load ")) {
             cmd_load((char*)buf + 5);
         } else if (starts_with((char*)buf, "peek ")) {

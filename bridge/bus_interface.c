@@ -68,11 +68,16 @@ static bus_tx_callback_t tx_callbacks[BUS_MAX_DEVICES];
 // Temp buffer for assembling wrapped DMA ring data (max transfer = 255)
 static uint8_t rx_transaction_buf[255];
 
-// Protocol state machine
+// Protocol state machine. Read / write is from the 6502's prespective,
+// receiving / sending from the Pico's.
 typedef enum {
+    // Idle, waiting for a new transaction
     PROTO_IDLE,
+    // Received device byte for write, waiting for length
     PROTO_GOT_DEVICE,
+    // Receiving write data bytes
     PROTO_RECEIVING,
+    // Received read request, preparing response
     PROTO_SENDING
 } proto_state_t;
 
@@ -81,7 +86,7 @@ static uint8_t current_device = 0;
 static uint16_t transfer_remaining = 0;
 static bool pending_read_request = false;
 static uint8_t pending_read_device = 0;   // device ID saved when read request is received
-static bool read_underflow_recorded = false;
+static bool empty_read_recorded = false;
 
 // RX transaction tracking for callback dispatch + overrun detection
 static uint rx_transaction_start_idx = 0;
@@ -96,6 +101,7 @@ static void setup_dma(void);
 static void process_rx_data(void);
 static void feed_tx_fifo(void);
 static void dma_rx_irq_handler(void);
+static void handle_transaction_start_byte(uint8_t byte);
 
 void bus_register_rx_callback(uint8_t device, bus_rx_callback_t callback) {
     if (device < BUS_MAX_DEVICES) {
@@ -232,6 +238,28 @@ static inline uint32_t get_dma_rx_total_written(void) {
     return total;
 }
 
+static void handle_transaction_start_byte(uint8_t byte) {
+    // First byte: device number (bit 7 = read flag)
+    current_device = byte & 0x7F;
+    if (current_device >= BUS_MAX_DEVICES) {
+        printf("!!! Invalid device %d (byte=0x%02x) in IDLE\n",
+               current_device, byte);
+        proto_state = PROTO_IDLE;
+        return;
+    }
+
+    if (byte & 0x80) {
+        // Read request - save device and queue for feed_tx_fifo
+        pending_read_request = true;
+        pending_read_device = current_device;
+        empty_read_recorded = false;
+        proto_state = PROTO_IDLE;
+    } else {
+        // Write request - expect length next
+        proto_state = PROTO_GOT_DEVICE;
+    }
+}
+
 // Dispatch the completed RX transaction to the device callback.
 // Returns true on bankruptcy (caller must bail out of process_rx_data).
 static bool dispatch_rx_callback(void) {
@@ -290,23 +318,7 @@ static void process_rx_data(void) {
 
         switch (proto_state) {
             case PROTO_IDLE:
-                // First byte: device number (bit 7 = read flag)
-                current_device = byte & 0x7F;
-                if (current_device >= BUS_MAX_DEVICES) {
-                    printf("!!! Invalid device %d (byte=0x%02x) in IDLE\n",
-                           current_device, byte);
-                    break;
-                }
-                if (byte & 0x80) {
-                    // Read request - save device and queue for feed_tx_fifo
-                    pending_read_request = true;
-                    pending_read_device = current_device;
-                    read_underflow_recorded = false;
-                    proto_state = PROTO_IDLE;
-                } else {
-                    // Write request - expect length next
-                    proto_state = PROTO_GOT_DEVICE;
-                }
+                handle_transaction_start_byte(byte);
                 break;
 
             case PROTO_GOT_DEVICE:
@@ -333,23 +345,18 @@ static void process_rx_data(void) {
                 break;
 
             case PROTO_SENDING:
-                // Unexpected RX during send - treat as new command
-                printf("!!! RX byte=0x%02x during SENDING (dma_busy=%d)\n",
-                       byte, dma_channel_is_busy(dma_tx_chan));
-                current_device = byte & 0x7F;
-                if (current_device >= BUS_MAX_DEVICES) {
-                    printf("!!! Invalid device %d in SENDING\n", current_device);
+                if (!dma_channel_is_busy(dma_tx_chan)) {
+                    // The DMA completed after process_rx_data() started but before
+                    // feed_tx_fifo() had a chance to collapse PROTO_SENDING back to
+                    // IDLE. Recover by treating this byte as a fresh transaction.
                     proto_state = PROTO_IDLE;
+                    handle_transaction_start_byte(byte);
                     break;
                 }
-                if (byte & 0x80) {
-                    pending_read_request = true;
-                    pending_read_device = current_device;
-                    read_underflow_recorded = false;
-                    proto_state = PROTO_IDLE;
-                } else {
-                    proto_state = PROTO_GOT_DEVICE;
-                }
+
+                // Unexpected RX while the TX DMA is still active.
+                printf("!!! RX byte=0x%02x during SENDING (dma_busy=1)\n", byte);
+                handle_transaction_start_byte(byte);
                 break;
         }
     }
@@ -414,7 +421,7 @@ static void feed_tx_fifo(void) {
             start_tx_dma(len + 1);
             proto_state = PROTO_SENDING;
             pending_read_request = false;
-            read_underflow_recorded = false;
+            empty_read_recorded = false;
         } else {
             // No data available - send length=0 so the 6502 can move on
             // (otherwise it polls 0xFF forever)
@@ -422,9 +429,9 @@ static void feed_tx_fifo(void) {
             start_tx_dma(1);
             proto_state = PROTO_SENDING;
             pending_read_request = false;
-            if (!read_underflow_recorded) {
-                stats.tx_underflows++;
-                read_underflow_recorded = true;
+            if (!empty_read_recorded) {
+                stats.tx_empty_reads++;
+                empty_read_recorded = true;
             }
         }
     }

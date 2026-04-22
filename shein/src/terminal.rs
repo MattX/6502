@@ -1,5 +1,5 @@
 use ratatui::style::{Color, Modifier, Style};
-use vte::{Params, Perform, Parser};
+use vte::{Params, Parser, Perform};
 
 pub const COLS: usize = 40;
 pub const ROWS: usize = 25;
@@ -25,6 +25,7 @@ pub struct Terminal {
     pub cursor_col: usize,
     current_style: Style,
     parser: Parser,
+    last_line_ending: Option<u8>,
 }
 
 impl Terminal {
@@ -35,12 +36,18 @@ impl Terminal {
             cursor_col: 0,
             current_style: Style::default(),
             parser: Parser::new(),
+            last_line_ending: None,
         }
     }
 
     /// Feed raw bytes from device 2 into the terminal.
     pub fn feed(&mut self, bytes: &[u8]) {
         for &b in bytes {
+            if b == 0x7f {
+                self.clear_line_ending_state();
+                self.backspace();
+                continue;
+            }
             // VTE parser calls back into our Perform impl via a helper closure.
             // We need to use a temporary because Parser::advance takes &mut self
             // and calls Perform methods on a separate receiver.
@@ -78,6 +85,29 @@ impl Terminal {
         }
     }
 
+    fn clear_line_ending_state(&mut self) {
+        self.last_line_ending = None;
+    }
+
+    fn line_break(&mut self, byte: u8) {
+        let paired_break = matches!(
+            (self.last_line_ending, byte),
+            (Some(b'\r'), b'\n') | (Some(b'\n'), b'\r')
+        );
+
+        if !paired_break {
+            self.newline();
+        }
+        self.last_line_ending = Some(byte);
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor_col > 0 {
+            self.cursor_col -= 1;
+            self.cells[self.cursor_row][self.cursor_col] = Cell::default();
+        }
+    }
+
     fn apply_sgr(&mut self, params: &Params) {
         // Collect into a flat Vec so we can index-advance for extended colors
         let p: Vec<u16> = params.iter().map(|s| s[0]).collect();
@@ -94,7 +124,9 @@ impl Terminal {
                 23 => self.current_style = self.current_style.remove_modifier(Modifier::ITALIC),
                 24 => self.current_style = self.current_style.remove_modifier(Modifier::UNDERLINED),
                 27 => self.current_style = self.current_style.remove_modifier(Modifier::REVERSED),
-                29 => self.current_style = self.current_style.remove_modifier(Modifier::CROSSED_OUT),
+                29 => {
+                    self.current_style = self.current_style.remove_modifier(Modifier::CROSSED_OUT)
+                }
                 // Foreground colors
                 30 => self.current_style = self.current_style.fg(Color::Black),
                 31 => self.current_style = self.current_style.fg(Color::Red),
@@ -130,16 +162,28 @@ impl Terminal {
                 // Bright foreground
                 90..=97 => {
                     let bright = [
-                        Color::DarkGray, Color::LightRed, Color::LightGreen, Color::LightYellow,
-                        Color::LightBlue, Color::LightMagenta, Color::LightCyan, Color::White,
+                        Color::DarkGray,
+                        Color::LightRed,
+                        Color::LightGreen,
+                        Color::LightYellow,
+                        Color::LightBlue,
+                        Color::LightMagenta,
+                        Color::LightCyan,
+                        Color::White,
                     ];
                     self.current_style = self.current_style.fg(bright[(p[i] - 90) as usize]);
                 }
                 // Bright background
                 100..=107 => {
                     let bright = [
-                        Color::DarkGray, Color::LightRed, Color::LightGreen, Color::LightYellow,
-                        Color::LightBlue, Color::LightMagenta, Color::LightCyan, Color::White,
+                        Color::DarkGray,
+                        Color::LightRed,
+                        Color::LightGreen,
+                        Color::LightYellow,
+                        Color::LightBlue,
+                        Color::LightMagenta,
+                        Color::LightCyan,
+                        Color::White,
                     ];
                     self.current_style = self.current_style.bg(bright[(p[i] - 100) as usize]);
                 }
@@ -221,6 +265,7 @@ fn parse_extended_color(rest: &[u16]) -> Option<(Color, usize)> {
 
 impl Perform for Terminal {
     fn print(&mut self, c: char) {
+        self.clear_line_ending_state();
         if self.cursor_row < ROWS && self.cursor_col < COLS {
             self.cells[self.cursor_row][self.cursor_col] = Cell {
                 ch: c,
@@ -232,24 +277,26 @@ impl Perform for Terminal {
 
     fn execute(&mut self, byte: u8) {
         match byte {
-            b'\n' => self.newline(),
-            b'\r' => self.cursor_col = 0,
-            0x08 => {
-                // Backspace
-                if self.cursor_col > 0 {
-                    self.cursor_col -= 1;
-                }
-            }
+            b'\n' | b'\r' => self.line_break(byte),
+            0x08 | 0x7f => self.backspace(),
             0x09 => {
+                self.clear_line_ending_state();
                 // Tab: advance to next 8-column boundary
                 let target = (self.cursor_col + 8) & !7;
                 self.cursor_col = target.min(COLS - 1);
             }
-            _ => {}
+            _ => self.clear_line_ending_state(),
         }
     }
 
-    fn csi_dispatch(&mut self, params: &Params, _intermediates: &[u8], _ignore: bool, action: char) {
+    fn csi_dispatch(
+        &mut self,
+        params: &Params,
+        _intermediates: &[u8],
+        _ignore: bool,
+        action: char,
+    ) {
+        self.clear_line_ending_state();
         let p: Vec<u16> = params.iter().map(|p| p[0]).collect();
         let p1 = || p.first().copied().unwrap_or(1).max(1) as usize;
         let p0 = || p.first().copied().unwrap_or(0);
@@ -281,5 +328,64 @@ impl Perform for Terminal {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Terminal;
+
+    #[test]
+    fn backspace_clears_previous_character() {
+        let mut terminal = Terminal::new();
+        terminal.feed(b"AB\x08");
+
+        assert_eq!(terminal.cells[0][0].ch, 'A');
+        assert_eq!(terminal.cells[0][1].ch, ' ');
+        assert_eq!(terminal.cursor_row, 0);
+        assert_eq!(terminal.cursor_col, 1);
+    }
+
+    #[test]
+    fn del_is_treated_like_backspace() {
+        let mut terminal = Terminal::new();
+        terminal.feed(b"AB\x7f");
+
+        assert_eq!(terminal.cells[0][0].ch, 'A');
+        assert_eq!(terminal.cells[0][1].ch, ' ');
+        assert_eq!(terminal.cursor_col, 1);
+    }
+
+    #[test]
+    fn carriage_return_advances_to_next_line() {
+        let mut terminal = Terminal::new();
+        terminal.feed(b"A\rB");
+
+        assert_eq!(terminal.cells[0][0].ch, 'A');
+        assert_eq!(terminal.cells[1][0].ch, 'B');
+        assert_eq!(terminal.cursor_row, 1);
+        assert_eq!(terminal.cursor_col, 1);
+    }
+
+    #[test]
+    fn crlf_is_a_single_line_break() {
+        let mut terminal = Terminal::new();
+        terminal.feed(b"A\r\nB");
+
+        assert_eq!(terminal.cells[0][0].ch, 'A');
+        assert_eq!(terminal.cells[1][0].ch, 'B');
+        assert_eq!(terminal.cursor_row, 1);
+        assert_eq!(terminal.cursor_col, 1);
+    }
+
+    #[test]
+    fn lfcr_is_a_single_line_break() {
+        let mut terminal = Terminal::new();
+        terminal.feed(b"A\n\rB");
+
+        assert_eq!(terminal.cells[0][0].ch, 'A');
+        assert_eq!(terminal.cells[1][0].ch, 'B');
+        assert_eq!(terminal.cursor_row, 1);
+        assert_eq!(terminal.cursor_col, 1);
     }
 }

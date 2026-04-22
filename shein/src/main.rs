@@ -8,12 +8,14 @@ use std::io;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::ExecutableCommand;
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use ratatui::backend::CrosstermBackend;
 
-use spi_master::{IrqWatcher, SpiMaster, MAX_PAYLOAD, NUM_DEVICES};
+use spi_master::{IrqWatcher, MAX_PAYLOAD, NUM_DEVICES, SpiMaster};
 use terminal::Terminal;
 use ui::StatusInfo;
 
@@ -123,7 +125,10 @@ impl App {
             match result {
                 Some((payload, _buf)) => {
                     self.status.buf = self.master.buf;
-                    self.log_verbose(format!("drain_spi[{round}]: READ {} payload bytes", payload.len()));
+                    self.log_verbose(format!(
+                        "drain_spi[{round}]: READ {} payload bytes",
+                        payload.len()
+                    ));
                     if !payload.is_empty() {
                         for (device, data) in parse_tlv_payload(&payload) {
                             self.dispatch_rx(device, &data);
@@ -177,10 +182,14 @@ impl App {
                 // Echo: log summary and send back
                 let n = data.len();
                 let preview = if n <= 10 {
-                    data.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+                    data.iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 } else {
                     let head: Vec<String> = data[..5].iter().map(|b| format!("{b:02x}")).collect();
-                    let tail: Vec<String> = data[n - 5..].iter().map(|b| format!("{b:02x}")).collect();
+                    let tail: Vec<String> =
+                        data[n - 5..].iter().map(|b| format!("{b:02x}")).collect();
                     format!("{} .. {}", head.join(" "), tail.join(" "))
                 };
                 self.log_verbose(format!("Echo: {n} bytes [{preview}]"));
@@ -196,7 +205,9 @@ impl App {
     fn enqueue_tlv(&mut self, device: u8, data: &[u8]) {
         let dev = device as usize;
         if dev >= NUM_DEVICES {
-            self.log(format!("enqueue_tlv: device {device} out of range, dropped"));
+            self.log(format!(
+                "enqueue_tlv: device {device} out of range, dropped"
+            ));
             return;
         }
         let chunk_size = match device {
@@ -267,7 +278,10 @@ impl App {
                 prefixed.push((total_len >> 8) as u8);
                 prefixed.push((total_len & 0xFF) as u8);
                 prefixed.extend_from_slice(&file_data);
-                self.log(format!("Netboot: sending {} bytes from {name}", file_data.len()));
+                self.log(format!(
+                    "Netboot: sending {} bytes from {name}",
+                    file_data.len()
+                ));
                 self.enqueue_tlv(3, &prefixed);
             }
             Err(e) => {
@@ -311,8 +325,8 @@ fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
             let s = c.encode_utf8(&mut buf);
             Some(s.as_bytes().to_vec())
         }
-        KeyCode::Enter => Some(vec![b'\r']),
-        KeyCode::Backspace => Some(vec![0x7f]),
+        KeyCode::Enter => Some(vec![b'\n']),
+        KeyCode::Backspace => Some(vec![0x08]),
         KeyCode::Tab => Some(vec![b'\t']),
         KeyCode::Esc => Some(vec![0x1b]),
         KeyCode::Up => Some(b"\x1b[A".to_vec()),
@@ -374,7 +388,10 @@ fn main() -> Result<()> {
     result
 }
 
-fn run_loop(tui: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
+fn run_loop(
+    tui: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+) -> Result<()> {
     while app.running {
         // Render
         tui.draw(|frame| {

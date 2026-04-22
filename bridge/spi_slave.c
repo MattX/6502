@@ -125,10 +125,12 @@ static inline uint32_t get_dma_rx_total_written(void) {
 
 static inline void irq_pin_assert(void) {
     gpio_put(SPI_SLAVE_PIN_IRQ, 0);  // Active low
+    stats.irq = true;
 }
 
 static inline void irq_pin_deassert(void) {
     gpio_put(SPI_SLAVE_PIN_IRQ, 1);  // Idle high
+    stats.irq = false;
 }
 
 static inline void ready_pin_assert(void) {
@@ -155,14 +157,13 @@ static void tx_queue_drain(uint8_t *dst, uint count) {
 }
 
 // ============================================================================
-// CS pin interrupt: fires on rising edge (end of transaction)
+// GPIO IRQ handling: CS rising edge marks end of SPI transaction
 // ============================================================================
 
-static void cs_rise_handler(uint gpio, uint32_t events) {
-    (void)gpio;
-    (void)events;
-
-    if (state == STATE_READY) {
+void spi_slave_gpio_irq(uint gpio, uint32_t events) {
+    if (gpio == SPI_SLAVE_PIN_CSN &&
+        (events & GPIO_IRQ_EDGE_RISE) &&
+        state == STATE_READY) {
         // READ just completed. Deassert READY.
         ready_pin_deassert();
         state = STATE_IDLE;
@@ -186,7 +187,6 @@ static void prepare_and_load_tx(void) {
     uint payload_len = 0;
 
     while (tx_queue_len >= 2) {
-        uint8_t tlv_dev = tx_queue_peek(0);
         uint8_t tlv_len = tx_queue_peek(1);
         uint tlv_total = 2 + tlv_len;
 
@@ -243,7 +243,8 @@ static void prepare_and_load_tx(void) {
 
 // ============================================================================
 // Process one complete transaction from the RX ring buffer.
-// Uses the live DMA write pointer so it's safe to call at any time.
+// Uses unread-byte accounting from the DMA epoch/counter pair, so a full
+// ring cannot be mistaken for empty when write_idx == read_idx.
 // Returns true if a transaction was consumed (caller should loop).
 // Returns false if no complete transaction is available yet.
 // ============================================================================
@@ -259,8 +260,7 @@ static bool process_transaction(void) {
     }
 
     uint rd = rx_read_idx;
-    uint wr = get_dma_rx_write_idx();
-    uint avail = (wr - rd) & (SPI_SLAVE_RX_RING_SIZE - 1);
+    uint avail = (uint)unread;
 
     if (avail == 0) return false;
 
@@ -278,7 +278,7 @@ static bool process_transaction(void) {
             if (payload_len > SPI_SLAVE_MAX_PAYLOAD) {
                 stats.proto_errors++;
                 dma_rx_total_read += avail;
-                rx_read_idx = wr;  // Discard up to current write pointer
+                rx_read_idx = (rd + avail) & (SPI_SLAVE_RX_RING_SIZE - 1);
                 return true;
             }
 
@@ -330,7 +330,7 @@ static bool process_transaction(void) {
         default: {
             stats.proto_errors++;
             dma_rx_total_read += avail;
-            rx_read_idx = wr;
+            rx_read_idx = (rd + avail) & (SPI_SLAVE_RX_RING_SIZE - 1);
             return true;
         }
     }
@@ -396,9 +396,7 @@ bool spi_slave_init(void) {
     dma_tx_chan = dma_claim_unused_channel(true);
 
     // --- CS pin interrupt: rising edge (end of transaction) ---
-    gpio_set_irq_enabled_with_callback(SPI_SLAVE_PIN_CSN,
-                                       GPIO_IRQ_EDGE_RISE,
-                                       true, cs_rise_handler);
+    gpio_set_irq_enabled(SPI_SLAVE_PIN_CSN, GPIO_IRQ_EDGE_RISE, true);
 
     // --- Init state ---
     memset(&stats, 0, sizeof(stats));
@@ -453,6 +451,14 @@ bool spi_slave_tx_queue(const uint8_t *data, uint16_t len) {
     }
 
     return true;
+}
+
+bool spi_slave_tx_queue_tlv(uint8_t device, const uint8_t *data, uint8_t len) {
+    uint8_t header[2] = { device, len };
+
+    if (spi_slave_tx_queue_free() < (uint)len + sizeof(header)) return false;
+    if (!spi_slave_tx_queue(header, sizeof(header))) return false;
+    return spi_slave_tx_queue(data, len);
 }
 
 void spi_slave_task(void) {

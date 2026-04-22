@@ -66,7 +66,7 @@ typedef struct {
     uint32_t tx_bytes;          // Total bytes sent to CPU
     uint32_t rx_dma_overruns;   // DMA overruns (data lost before processing)
     uint32_t rx_bankruptcies;   // DMA overruns during callback (data may be corrupt)
-    uint32_t tx_underflows;     // TX FIFO underflow count (reads when empty)
+    uint32_t tx_empty_reads;    // Read requests served with len=0
 } bus_stats_t;
 
 bus_stats_t bus_get_stats(void);
