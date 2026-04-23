@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = git@github.com:jeffnyman/zifmia.git
+	branch = master
+	commit = c43ef9e8ca45aa038363e3e682233cc7c43f8303
+	parent = ffa5ac3008fd41e9739a2b85b498cfd490c36184
+	method = merge
+	cmdver = 0.4.9
