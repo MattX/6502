@@ -1,0 +1,8 @@
+zdevtools-2.1.2/
+*.bin
+*.bin.elf
+
+# test and doc files
+mojozork
+zifmia/
+zspec.jaredreisinger.com/
